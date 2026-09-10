@@ -274,7 +274,7 @@ AgentRouter 基于 New-API 类后端，**登录动作本身就会触发当日签
 |---|---|---|---|
 | `base_url` | `AGENTROUTER_BASE_URL` | `https://agentrouter.org` | 站点地址，一般不用改 |
 | `accounts` | `AGENTROUTER_ACCOUNTS`<br>`AGENTROUTER_ACCOUNTS_JSON` | 无（必填） | 账号数组。环境变量写法见下 |
-| `proxies` | `AGENTROUTER_PROXIES` | `[]` | 代理列表，留空即直连 |
+| `proxies` | `AGENTROUTER_PROXIES` | `[]` | 一般不用配（直连即可），仅作排查后路 |
 | `request_timeout` | `AGENTROUTER_REQUEST_TIMEOUT` | `25` | 单次请求超时（秒），夹到 5–120 |
 | `budget_seconds` | `AGENTROUTER_BUDGET_SECONDS` | `300` | 单次运行总预算（秒），夹到 30–540 |
 | — | `AGENTROUTER_CONFIG` | 脚本同目录 `config.json` | 指定配置文件路径 |
@@ -293,18 +293,21 @@ bob@163.com:pw:with:colons"
 export AGENTROUTER_ACCOUNTS_JSON='[{"username":"alice@qq.com","password":" pw 1234 "}]'
 ```
 
-**代理写法**（`proxies` 数组或 `AGENTROUTER_PROXIES`，换行 / 逗号 / 分号都行）：
+**代理：默认不用配**
+
+`proxies` 留空（默认值）就好。AgentRouter 国内可以直连，**不需要挂梯子**。
+
+这里有个反直觉的点，值得单独强调：**如果你的代理开着 TUN 模式或系统代理，反而有可能把它带坏。** 因为流量一旦走进代理，出口就变成了机场节点的机房 IP，而站点用阿里云 WAF 拦机房 IP——本来直连能通，挂上代理反而不通了。
+
+所以不要「顺手」给它套代理。只有在一种情况下才需要填：**浏览器能正常打开站点，但脚本报 `NO_EXIT`**（说明脚本没继承到你的系统代理）。此时把本机代理端口显式写进去：
 
 ```text
-socks5://用户名:密码@代理地址:端口     # 自动转成 socks5h://，DNS 也走代理
-socks5h://用户名:密码@代理地址:端口
-http://用户名:密码@代理地址:端口
+socks5://127.0.0.1:7890     # Clash 的 mixed-port 同时接受 HTTP 和 SOCKS5
+socks5h://用户:密码@地址:端口  # 远程 SOCKS5，socks5h 表示 DNS 也走代理
+http://用户:密码@地址:端口
 ```
 
-> [!NOTE]
-> 如果本机直连不通、需要用 Clash 之类，填 `socks5://127.0.0.1:7890` 即可——Clash 的 `mixed-port` 默认同时接受 HTTP 和 SOCKS5，`http://127.0.0.1:7890` 也是合法的。`requirements.txt` 里的 `requests[socks]` 已经包含 SOCKS 支持。
->
-> 就算直连可用，把代理填在前面也无妨：脚本按顺序试，第一个能用的会被选中。
+脚本按「配置的代理 → 直连」的顺序逐个试探，第一个能用的被选中，所以填了也不会出错。
 
 ---
 
@@ -315,7 +318,7 @@ http://用户名:密码@代理地址:端口
 | `OK` | 本次触发了新签到，一切正常 |
 | `ALREADY` | 今天已经签过了，属正常状态，余额照常显示 |
 | `AUTH_ERROR` | 账号或密码不对。确认填的是**邮箱**，且已在站点绑定邮箱并重置过密码。注意站点不区分「密码错」和「账号被封禁」 |
-| `NO_EXIT` | 所有出口都被 WAF 拦截。换一个非机房的代理出口；或确认本机网络是否被限制 |
+| `NO_EXIT` | 所有出口都被 WAF 拦截。**先清空 `proxies` 试直连**——如果你正开着代理，很可能是出口变成了机场的机房 IP，被站点风控挡了 |
 | `NETWORK` | 连接层面就不通——断网、DNS 异常、代理地址/端口/账密错误 |
 | `TIMEOUT` | 已达时间预算。通常是网络严重超时，已成功的部分照常记录，剩余项下次再试 |
 | `CONFIG_ERROR` | 配置问题：没建 `config.json`、没填账号、`base_url` 不是 https 等。错误信息里会说明具体是哪一项 |
