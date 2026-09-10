@@ -26,10 +26,13 @@
     1  部分账号失败
     2  全部账号失败、配置错误，或站点不可达
 
-关于网络：脚本直接访问站点，不配置任何代理。AgentRouter 国内可直连；
-如果你开了 Clash 的 TUN 模式，那是系统层接管流量，脚本无感知，照样是直连。
-反过来要注意：把流量交给机场节点会换成机房出口 IP，而站点用阿里云 WAF
-拦机房 IP —— 直连能通、挂上代理反而可能不通。所以别专门给它套代理。
+关于网络：脚本没有任何代理配置项，会跟随系统的网络环境。
+
+- 打不开站点时，开 Clash 的 **TUN 模式**即可——它在网络层接管流量，脚本无感知，
+  不需要在脚本里配任何东西。
+- 站点用阿里云 WAF 拦**机房 / 脏的公共 IP**。所以能不能连上取决于出口 IP 的类型，
+  而不是"用没用代理"：住宅 / 家宽节点没问题，机房节点容易被拦。
+  （实测：GitHub Actions 的机房 IP 必被拦，住宅出口正常。）
 """
 
 from __future__ import annotations
@@ -363,7 +366,8 @@ class AccountResult:
     """单个账号的签到结果。
 
     account      脱敏后的用户名
-    checked_in   True 表示这次登录触发了新签到；False 表示今天已经签过
+    checked_in   站点登录响应里的 checked_in 原始值（实测恒为 true，
+                 不能用来判断当天是否第一次签，仅作数据保留）
     balance_usd  按 quota 折算的美元余额
     error         登录失败原因，非空即视为该账号失败
     warning       签到成功但余额查询异常时的提示，不影响成败判定
@@ -388,6 +392,10 @@ def create_session(config: Config) -> Session:
     """
 
     session = requests.Session()
+    # 这里刻意不动 requests 的代理自动继承（trust_env 保持默认 True）：
+    # 脚本没有代理配置项，但要能配合系统层方案工作——Clash 的 TUN 模式在
+    # 网络层接管流量（脚本无感知），系统代理模式下 requests 也会自动读取
+    # 系统设置，两种方式都不用改任何配置。
     session.headers.update(
         {
             "User-Agent": (
@@ -574,8 +582,11 @@ def judge(results: list[AccountResult]) -> str:
     successful = [r for r in results if not r.error]
     # 全部成功就是成功：哪怕预算刚好在最后一个账号之后耗尽，
     # 也不该把一次成功的签到报成 TIMEOUT（那会让定时任务无谓地变红）。
+    #
+    # 这里不再区分「新签到」和「已签到」：实测站点每次登录都返回
+    # checked_in=true，无法据此判断当天是不是第一次签，硬分只会得出假结论。
     if len(successful) == len(results):
-        return "OK" if any(r.checked_in for r in results) else "ALREADY"
+        return "OK"
     if successful:
         return "PARTIAL"
     if all("时间预算" in r.error for r in results):
@@ -610,10 +621,6 @@ def build_report(results: list[AccountResult], result_code: str) -> str:
     if result_code == "OK":
         return (
             f"签到成功 {len(successful)} 个账号，总余额 ${total_balance:,.2f}"
-        )
-    if result_code == "ALREADY":
-        return (
-            f"今日已签到（{len(results)} 个账号，总余额 ${total_balance:,.2f}）"
         )
     if result_code == "PARTIAL":
         failed = [r for r in results if r.error]
