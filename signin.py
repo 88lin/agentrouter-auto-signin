@@ -26,13 +26,9 @@
     1  部分账号失败
     2  全部账号失败、配置错误，或站点不可达
 
-关于网络：脚本没有任何代理配置项，会跟随系统的网络环境。
-
-- 打不开站点时，开 Clash 的 **TUN 模式**即可——它在网络层接管流量，脚本无感知，
-  不需要在脚本里配任何东西。
-- 站点用阿里云 WAF 拦**机房 / 脏的公共 IP**。所以能不能连上取决于出口 IP 的类型，
-  而不是"用没用代理"：住宅 / 家宽节点没问题，机房节点容易被拦。
-  （实测：GitHub Actions 的机房 IP 必被拦，住宅出口正常。）
+关于网络：脚本没有任何代理配置项，它会跟随系统的网络环境，不需要也不能在
+这里配代理。想换站点域名改 ``base_url`` 即可（环境变量 ``AGENTROUTER_BASE_URL``
+优先级更高）。
 """
 
 from __future__ import annotations
@@ -107,7 +103,7 @@ class BeijingLogFormatter(logging.Formatter):
 class Config:
     """运行期配置。所有字段都可以被环境变量覆盖。"""
 
-    base_url: str = "https://agentrouter.org"
+    base_url: str = "https://ps.air-outer.com"
     accounts: list[dict[str, str]] = field(default_factory=list)
     request_timeout: int = 25
     budget_seconds: int = DEFAULT_BUDGET_SECONDS
@@ -366,8 +362,8 @@ class AccountResult:
     """单个账号的签到结果。
 
     account      脱敏后的用户名
-    checked_in   站点登录响应里的 checked_in 原始值（实测恒为 true，
-                 不能用来判断当天是否第一次签，仅作数据保留）
+    checked_in   站点登录响应里的 checked_in 原始值。该字段恒为 true，
+                 判断不出当天是否首次签到，仅作数据保留
     balance_usd  按 quota 折算的美元余额
     error         登录失败原因，非空即视为该账号失败
     warning       签到成功但余额查询异常时的提示，不影响成败判定
@@ -392,10 +388,8 @@ def create_session(config: Config) -> Session:
     """
 
     session = requests.Session()
-    # 这里刻意不动 requests 的代理自动继承（trust_env 保持默认 True）：
-    # 脚本没有代理配置项，但要能配合系统层方案工作——Clash 的 TUN 模式在
-    # 网络层接管流量（脚本无感知），系统代理模式下 requests 也会自动读取
-    # 系统设置，两种方式都不用改任何配置。
+    # 保持 requests 默认的代理继承（不设 trust_env=False），这样系统层的网络
+    # 方案都能直接生效，脚本本身不需要也不提供任何代理配置。
     session.headers.update(
         {
             "User-Agent": (
@@ -583,8 +577,8 @@ def judge(results: list[AccountResult]) -> str:
     # 全部成功就是成功：哪怕预算刚好在最后一个账号之后耗尽，
     # 也不该把一次成功的签到报成 TIMEOUT（那会让定时任务无谓地变红）。
     #
-    # 这里不再区分「新签到」和「已签到」：实测站点每次登录都返回
-    # checked_in=true，无法据此判断当天是不是第一次签，硬分只会得出假结论。
+    # 这里不区分「新签到」和「已签到」：站点每次登录都返回 checked_in=true，
+    # 据此判断不出当天是不是第一次签，硬分只会得出假结论。
     if len(successful) == len(results):
         return "OK"
     if successful:
@@ -634,7 +628,7 @@ def build_report(results: list[AccountResult], result_code: str) -> str:
         first = results[0]
         return f"登录失败：{first.error[:160]}"
     if result_code == "NO_EXIT":
-        return "站点被 WAF 拦截，签到未执行（若正开着代理，请先关掉试直连）"
+        return "站点返回 WAF 拦截页，签到未执行（当前出口 IP 被风控）"
     if result_code == "NETWORK":
         return "网络不可达：无法连接站点，签到未执行"
     if result_code == "TIMEOUT":
@@ -703,11 +697,10 @@ def run_checkin(config: Config, silent: bool) -> int:
         failure = classify_connection_error(detail)
         if failure == "waf":
             log.error(
-                "站点返回 WAF 拦截页。这通常是出口 IP 被风控（机房 IP 会被拦）；"
-                "如果你正开着代理，先关掉试直连——代理出口反而更容易命中风控。"
+                "站点返回 WAF 拦截页：当前出口 IP 被站点风控，换个网络环境再试。"
             )
             result_code = "NO_EXIT"
-            reason = "站点被 WAF 拦截（机房出口 IP 常见），请试直连"
+            reason = "站点返回 WAF 拦截页，当前出口 IP 被风控"
         else:
             log.error("无法连接站点：%s", detail)
             result_code = "NETWORK"
@@ -782,7 +775,7 @@ def run_diagnose(config: Config, silent: bool) -> int:
         print(f"FAIL 无法访问 {config.base_url}")
         print(f"     {detail}")
         if classify_connection_error(detail) == "waf":
-            print("     这是 WAF 风控拦截，不是断网。若你正开着代理，先关掉试直连。")
+            print("     这是站点风控拦截（WAF），不是断网：换个网络环境再试。")
 
     payload = {
         "time": bjt_now(),
