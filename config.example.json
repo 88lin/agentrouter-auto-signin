@@ -1,0 +1,16 @@
+{
+  "base_url": "https://agentrouter.org",
+  "accounts": [
+    {
+      "username": "your-email@example.com",
+      "password": "your-password"
+    }
+  ],
+  "proxies": [],
+  "pushplus": {
+    "token": "",
+    "topic": "",
+    "title": "AgentRouter 签到通知",
+    "template": "html"
+  }
+}

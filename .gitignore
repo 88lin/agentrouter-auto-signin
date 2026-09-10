@@ -1,11 +1,9 @@
-# 本地环境变量文件（含账号密码，切勿提交）
-.env
-.env.*
-!.env.example
+# ⚠️ 你的账号密码就写在这里，绝对不要提交到任何仓库
+config.json
 
-# 本地私有配置
-config.local.py
-*.local.py
+# 运行日志
+checkin.log
+*.log
 
 # Python
 __pycache__/

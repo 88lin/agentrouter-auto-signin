@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    AgentRouter 自动签到 · macOS launchd 模板
+
+    使用方法：
+
+      1. 记下你的 python3 路径（务必以 which 的实际输出为准）：
+             which python3
+         注意：没装 Xcode Command Line Tools 时 /usr/bin/python3 只是个占位壳子，
+         命令行里跑会弹安装框，launchd 里跑则直接失败且错误只进 .err 文件。
+
+      2. 把本文件里两处 /PATH/TO/agentrouter-auto-signin 改成脚本所在目录的绝对路径，
+         若上一步 which 的输出不是 /usr/bin/python3，把 ProgramArguments 第一项也一并替换。
+
+      3. 安装并加载：
+             mkdir -p ~/Library/LaunchAgents
+             cp agentrouter-auto-signin.plist.example ~/Library/LaunchAgents/agentrouter-auto-signin.plist
+             launchctl bootout gui/$(id -u)/agentrouter-auto-signin 2>/dev/null
+             launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/agentrouter-auto-signin.plist
+
+      4. 查看日志：正常输出在 /tmp/agentrouter-auto-signin.out，
+         跑不起来时先看 /tmp/agentrouter-auto-signin.err。
+
+      5. 卸载：launchctl bootout gui/$(id -u)/agentrouter-auto-signin
+
+    提醒：脚本不要放在 ~/Documents、~/Desktop、~/Downloads 下——macOS 的隐私保护
+    （TCC）会拦截后台进程读取这些目录，报 Operation not permitted。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>agentrouter-auto-signin</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/PATH/TO/agentrouter-auto-signin/signin.py</string>
+        <string>silent</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/PATH/TO/agentrouter-auto-signin</string>
+
+    <!-- 每天 08:10 与 20:10 各跑一次。站点没有公开每日重置时点，
+         第二个时间点同时兜住「早上没开机」的情况。脚本幂等，重复运行无副作用。 -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key>
+            <integer>8</integer>
+            <key>Minute</key>
+            <integer>10</integer>
+        </dict>
+        <dict>
+            <key>Hour</key>
+            <integer>20</integer>
+            <key>Minute</key>
+            <integer>10</integer>
+        </dict>
+    </array>
+
+    <!-- 登录时不立即补跑，交给上面的时间点即可；想要「开机就补一次」改成 true -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/agentrouter-auto-signin.out</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/agentrouter-auto-signin.err</string>
+</dict>
+</plist>
