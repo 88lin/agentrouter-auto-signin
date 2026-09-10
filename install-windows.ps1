@@ -160,7 +160,7 @@ Write-Host "  Get-Content checkin.log -Tail 5    # 每行一条 JSON" -Foregroun
 Write-Host ""
 Write-Host "先手动跑一次确认能签上（有输出，便于排查）：" -ForegroundColor Cyan
 Write-Host "  python signin.py auto" -ForegroundColor DarkGray
-Write-Host "只想测网络出口：" -ForegroundColor Cyan
+Write-Host "只想确认站点是否可达：" -ForegroundColor Cyan
 Write-Host "  python signin.py diagnose" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "卸载" -ForegroundColor Cyan

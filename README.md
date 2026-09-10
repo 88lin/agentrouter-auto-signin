@@ -66,13 +66,13 @@
 | 🔐 | **无内置凭据** —— 仓库不含任何账号密码，配置只在你本机的 `config.json` 里 |
 | ♻️ | **幂等安全** —— 签到由登录动作触发，重复运行只会显示「今日已签到」，不会多领 |
 | 👥 | **多账号** —— 每个账号独立 Session，互不串号，一个失败不影响其他 |
-| 🌐 | **出口自动探测** —— 按配置顺序试代理，最后试直连；自动识别被 WAF 拦截的情况 |
+| 🌐 | **零网络配置** —— 直连访问即可，不用配代理；开着 TUN 也是无感直连 |
 | 🧮 | **余额自动换算** —— 从站点 `/api/status` 读取 `quota_per_unit`，站点改比例也不会算错 |
-| 🩺 | **诊断模式** —— `diagnose` 一条命令测出哪个出口可用，不用盲猜 |
+| 🩺 | **诊断模式** —— `diagnose` 一条命令区分「被 WAF 拦」和「断网」，不用盲猜 |
 | 📣 | **一行 JSON** —— `result` 给程序看，`report` 给人看，便于接任何汇报方式 |
 | ⏰ | **双定时模式** —— AI 自动化（跨平台）或系统级静默（Win 一键脚本 / macOS launchd / Linux cron） |
 | 🛡️ | **异常不静默吞** —— 任何异常都会落成一条结果记录，不会悄悄消失 |
-| 🕵️ | **自动脱敏** —— 日志里账号只留前 4 位，密码 / 代理凭据替换为 `***` |
+| 🕵️ | **自动脱敏** —— 日志里账号只留前 4 位，密码替换为 `***` |
 
 ---
 
@@ -111,10 +111,10 @@ cp config.example.json config.json      # Windows: Copy-Item config.example.json
 }
 ```
 
-**第 3 步 · 先测出口，再签一次**
+**第 3 步 · 先探一次站点，再签一次**
 
 ```bash
-python signin.py diagnose     # 看哪个出口能连上站点，看到 OK 就行
+python signin.py diagnose     # 确认站点可达，看到 OK 就行
 python signin.py auto         # 正式签到
 ```
 
@@ -238,7 +238,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/agentrouter-auto-signin.
 python signin.py            # 等同 auto
 python signin.py auto       # 签到 + 查余额，结果打到 stdout
 python signin.py silent     # 同上，但结果写入 checkin.log
-python signin.py diagnose   # 只探测网络出口，不登录任何账号
+python signin.py diagnose   # 只确认站点是否可达，不登录任何账号
 python signin.py --help     # 看用法
 ```
 
@@ -253,7 +253,7 @@ AgentRouter 基于 New-API 类后端，**登录动作本身就会触发当日签
 
 | 步骤 | 接口 | 作用 |
 |:---:|---|---|
-| 1️⃣ 探测出口 | `GET /api/status` | 按「配置的代理 → 直连」依次试探，确认哪个出口能访问站点，同时读出 `quota_per_unit` |
+| 1️⃣ 确认可达 | `GET /api/status` | 直连访问一次，确认站点可达，同时读出 `quota_per_unit` |
 | 2️⃣ 登录签到 | `POST /api/user/login` | 每个账号用独立 Session 登录，登录成功即完成签到 |
 | 3️⃣ 查询余额 | `GET /api/user/self` | 带 `New-API-User` 请求头读取 `quota`，按 `quota_per_unit` 折算成美元 |
 
@@ -262,7 +262,7 @@ AgentRouter 基于 New-API 类后端，**登录动作本身就会触发当日签
 >
 > 余额查询失败只记 `warning`，不会把已经完成的签到改判为失败。
 >
-> 整个运行受「时间预算」约束（默认 300 秒）：代理挂掉时不会让请求逐个超时把计划任务拖到被系统强杀，而是主动收尾并如实记录。
+> 整个运行受「时间预算」约束（默认 300 秒）：网络严重超时时不会让请求逐个挂死把计划任务拖到被系统强杀，而是主动收尾并如实记录。
 
 ---
 
@@ -274,7 +274,6 @@ AgentRouter 基于 New-API 类后端，**登录动作本身就会触发当日签
 |---|---|---|---|
 | `base_url` | `AGENTROUTER_BASE_URL` | `https://agentrouter.org` | 站点地址，一般不用改 |
 | `accounts` | `AGENTROUTER_ACCOUNTS`<br>`AGENTROUTER_ACCOUNTS_JSON` | 无（必填） | 账号数组。环境变量写法见下 |
-| `proxies` | `AGENTROUTER_PROXIES` | `[]` | 一般不用配（直连即可），仅作排查后路 |
 | `request_timeout` | `AGENTROUTER_REQUEST_TIMEOUT` | `25` | 单次请求超时（秒），夹到 5–120 |
 | `budget_seconds` | `AGENTROUTER_BUDGET_SECONDS` | `300` | 单次运行总预算（秒），夹到 30–540 |
 | — | `AGENTROUTER_CONFIG` | 脚本同目录 `config.json` | 指定配置文件路径 |
@@ -293,21 +292,14 @@ bob@163.com:pw:with:colons"
 export AGENTROUTER_ACCOUNTS_JSON='[{"username":"alice@qq.com","password":" pw 1234 "}]'
 ```
 
-**代理：默认不用配**
+**关于网络：不需要任何配置**
 
-`proxies` 留空（默认值）就好。AgentRouter 国内可以直连，**不需要挂梯子**。
+脚本直接访问站点，没有代理配置项。AgentRouter 国内可以直连。开着 Clash 的 TUN 模式也一样——那是系统层接管流量，脚本无感知，走的仍是直连。
 
-这里有个反直觉的点，值得单独强调：**如果你的代理开着 TUN 模式或系统代理，反而有可能把它带坏。** 因为流量一旦走进代理，出口就变成了机场节点的机房 IP，而站点用阿里云 WAF 拦机房 IP——本来直连能通，挂上代理反而不通了。
-
-所以不要「顺手」给它套代理。只有在一种情况下才需要填：**浏览器能正常打开站点，但脚本报 `NO_EXIT`**（说明脚本没继承到你的系统代理）。此时把本机代理端口显式写进去：
-
-```text
-socks5://127.0.0.1:7890     # Clash 的 mixed-port 同时接受 HTTP 和 SOCKS5
-socks5h://用户:密码@地址:端口  # 远程 SOCKS5，socks5h 表示 DNS 也走代理
-http://用户:密码@地址:端口
-```
-
-脚本按「配置的代理 → 直连」的顺序逐个试探，第一个能用的被选中，所以填了也不会出错。
+> [!IMPORTANT]
+> 反过来要注意：**不要专门给它套代理。** 流量一旦交给机场节点，出口就变成机房 IP，而站点用阿里云 WAF 拦机房 IP——本来直连能通，挂了代理反而不通。
+>
+> 万一真的连不上（脚本报 `NO_EXIT`），先跑 `python signin.py diagnose` 看看是「被 WAF 拦」还是「断网」，再对症处理。
 
 ---
 
@@ -318,18 +310,17 @@ http://用户:密码@地址:端口
 | `OK` | 本次触发了新签到，一切正常 |
 | `ALREADY` | 今天已经签过了，属正常状态，余额照常显示 |
 | `AUTH_ERROR` | 账号或密码不对。确认填的是**邮箱**，且已在站点绑定邮箱并重置过密码。注意站点不区分「密码错」和「账号被封禁」 |
-| `NO_EXIT` | 所有出口都被 WAF 拦截。**先清空 `proxies` 试直连**——如果你正开着代理，很可能是出口变成了机场的机房 IP，被站点风控挡了 |
-| `NETWORK` | 连接层面就不通——断网、DNS 异常、代理地址/端口/账密错误 |
+| `NO_EXIT` | 站点返回了 WAF 拦截页。**先确认自己没开着代理**——代理出口是机房 IP 时最容易命中风控；关掉代理走直连通常就好了 |
+| `NETWORK` | 连接层面就不通——断网、DNS 异常、被本地防火墙拦截 |
 | `TIMEOUT` | 已达时间预算。通常是网络严重超时，已成功的部分照常记录，剩余项下次再试 |
 | `CONFIG_ERROR` | 配置问题：没建 `config.json`、没填账号、`base_url` 不是 https 等。错误信息里会说明具体是哪一项 |
 | `ERROR` | 其他异常。`report` 里带异常摘要，`error_type` 里是异常类型 |
-| `ProxyError` / 连接超时 | 代理填写有误，或代理进程没在跑 |
-| `返回的不是 JSON` | 出口被中间设备改写响应，换出口 |
+| `返回的不是 JSON` | 被中间设备改写了响应，换网络环境再试 |
 | 提示缺少 `requests` | 先在仓库目录执行 `python -m pip install -r requirements.txt` |
 | 计划任务没跑 | Windows 用 `Get-ScheduledTaskInfo -TaskName "AgentRouterAutoSignin"` 看 `LastTaskResult`；macOS 先看 `/tmp/agentrouter-auto-signin.err` |
 | `checkin.log` 是空的 | 只有 `silent` 模式才写日志。手动跑 `auto` 的结果只打到屏幕 |
 
-**先跑 `python signin.py diagnose`**，它能一次性告诉你每个出口的真实状态，绝大多数问题在这一步就能定位。
+**先跑 `python signin.py diagnose`**，它会直接告诉你站点是否可达、是不是被 WAF 拦，绝大多数问题在这一步就能定位。
 
 ---
 
@@ -337,7 +328,7 @@ http://用户:密码@地址:端口
 
 - 仓库不含、不内嵌、不传输任何第三方凭据；账号密码只存在于**你自己本机**的 `config.json` 里
 - `config.json` 已在 `.gitignore` 中——**别把它提交到任何仓库**，也别贴到聊天记录里
-- 日志里账号只保留前 4 位（`alic*****`）；发生异常时，脚本会把密码、代理账密从错误信息里替换成 `***`（只替换长度 ≥ 4 的片段，避免误伤正常文本）
+- 日志里账号只保留前 4 位（`alic*****`）；发生异常时，脚本会把密码从错误信息里替换成 `***`（只替换长度 ≥ 4 的片段，避免误伤正常文本）
 - 脚本只作用于**你自己的**账号，可安全 fork、分享
 
 ---

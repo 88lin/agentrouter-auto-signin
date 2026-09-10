@@ -7,7 +7,7 @@
 核心流程：
 
 1. 读取 ``config.json``（环境变量可覆盖任意一项）。
-2. 依次尝试配置的代理，最后再尝试直连，选出能访问站点的网络出口。
+2. 调用 ``GET /api/status`` 确认站点可达，并读出余额换算单位。
 3. 每个账号使用独立 Session 调用 ``POST /api/user/login`` 登录。
 4. AgentRouter 的登录动作本身就会触发当日签到，无需额外签到接口。
 5. 调用 ``GET /api/user/self`` 查询余额，按站点公布的换算单位折成美元。
@@ -18,17 +18,18 @@
     python signin.py             # 等同 auto
     python signin.py auto        # 签到 + 查余额，结果打到 stdout
     python signin.py silent      # 同上，但结果写入日志文件（配合系统定时任务）
-    python signin.py diagnose    # 只探测网络出口，不登录任何账号
+    python signin.py diagnose    # 只探测站点是否可达，不登录任何账号
 
 退出码：
 
     0  全部账号成功（含"今日已签到"）
     1  部分账号失败
-    2  全部账号失败、配置错误，或找不到可用网络出口
+    2  全部账号失败、配置错误，或站点不可达
 
-注意：AgentRouter 使用阿里云 WAF，会拦截机房 / 云服务器出口 IP。
-本脚本面向**本机运行**，家宽出口一般可直连；若你的网络环境受限，
-请在 ``proxies`` 里配置自己的代理。
+关于网络：脚本直接访问站点，不配置任何代理。AgentRouter 国内可直连；
+如果你开了 Clash 的 TUN 模式，那是系统层接管流量，脚本无感知，照样是直连。
+反过来要注意：把流量交给机场节点会换成机房出口 IP，而站点用阿里云 WAF
+拦机房 IP —— 直连能通、挂上代理反而可能不通。所以别专门给它套代理。
 """
 
 from __future__ import annotations
@@ -41,8 +42,7 @@ import time
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Iterable
-from urllib.parse import urlsplit
+from typing import Any
 
 try:
     import requests
@@ -106,7 +106,6 @@ class Config:
 
     base_url: str = "https://agentrouter.org"
     accounts: list[dict[str, str]] = field(default_factory=list)
-    proxies: list[str] = field(default_factory=list)
     request_timeout: int = 25
     budget_seconds: int = DEFAULT_BUDGET_SECONDS
     log_path: Path = DEFAULT_LOG_PATH
@@ -190,18 +189,6 @@ def _parse_accounts_from_json(raw_json: str) -> list[dict[str, str]]:
     return accounts
 
 
-def _parse_proxies(raw_value: Any) -> list[str]:
-    """解析代理列表，兼容 JSON 数组、逗号 / 换行 / 分号分隔的字符串。"""
-
-    if raw_value is None or raw_value == "":
-        return []
-    if isinstance(raw_value, list):
-        items = [str(item) for item in raw_value]
-    else:
-        items = str(raw_value).replace(";", "\n").replace(",", "\n").splitlines()
-    return [item.strip() for item in items if item.strip()]
-
-
 def load_config(config_path: Path | None = None) -> Config:
     """加载配置：先读 ``config.json``，再用环境变量覆盖。
 
@@ -211,7 +198,6 @@ def load_config(config_path: Path | None = None) -> Config:
         日志文件路径    AGENTROUTER_LOG
         账号（多行）    AGENTROUTER_ACCOUNTS
         账号（JSON）    AGENTROUTER_ACCOUNTS_JSON
-        代理列表        AGENTROUTER_PROXIES
         站点地址        AGENTROUTER_BASE_URL
         请求超时        AGENTROUTER_REQUEST_TIMEOUT
         时间预算        AGENTROUTER_BUDGET_SECONDS
@@ -265,12 +251,6 @@ def load_config(config_path: Path | None = None) -> Config:
             config.accounts = parsed
         else:
             raise ConfigError("accounts 必须是数组")
-
-    # ---- 代理 ----
-    if _env("AGENTROUTER_PROXIES"):
-        config.proxies = _parse_proxies(_env("AGENTROUTER_PROXIES"))
-    else:
-        config.proxies = _parse_proxies(raw.get("proxies"))
 
     # ---- 超时与预算 ----
     config.request_timeout = _env_int(
@@ -335,49 +315,17 @@ def mask_account(username: str) -> str:
     return f"{username[:4]}*****" if len(username) > 4 else f"{username}*****"
 
 
-def normalize_proxy(proxy_url: str) -> str:
-    """统一代理协议写法。
-
-    requests 配合 PySocks 时，``socks5h://`` 会让主机名解析也走代理。
-    这里把常见的 ``socks5://`` / ``socks://`` 统一成 ``socks5h://``。
-    """
-
-    proxy_url = proxy_url.strip()
-    for prefix in ("socks5://", "socks://"):
-        if proxy_url.startswith(prefix):
-            return "socks5h://" + proxy_url[len(prefix) :]
-    return proxy_url
-
-
-def proxy_label(proxy_url: str) -> str:
-    """生成不暴露账号密码的代理标签：example.com:1080 / direct"""
-
-    if not proxy_url:
-        return "direct"
-    parsed = urlsplit(proxy_url)
-    host = parsed.hostname or "configured-proxy"
-    return f"{host}:{parsed.port}" if parsed.port else host
-
-
 def safe_error(error: object) -> str:
     """清理错误信息里的敏感内容。
 
-    只替换长度 >= 4 的凭据：代理用户名 / 密码可能只有一个字符，
-    参与替换会把 ``https://`` 之类的普通文本一起打碎，反而没法排查。
+    只替换长度 >= 4 的凭据：太短的片段参与替换会把 ``https://`` 之类的
+    普通文本一起打碎，反而没法排查。
     """
 
     message = str(error)
     config = CONFIG_REF[0]
     secrets: list[str] = []
     if config is not None:
-        for proxy in config.proxies:
-            normalized = normalize_proxy(str(proxy))
-            secrets.extend((str(proxy), normalized))
-            parsed = urlsplit(normalized)
-            if parsed.username:
-                secrets.append(parsed.username)
-            if parsed.password:
-                secrets.append(parsed.password)
         secrets.extend(
             str(account.get("password", "")) for account in config.accounts
         )
@@ -440,7 +388,7 @@ RESULT_MESSAGES = {
     "ALREADY": "今日已签到",
     "PARTIAL": "部分账号失败",
     "AUTH_ERROR": "登录失败",
-    "NO_EXIT": "找不到可用网络出口",
+    "NO_EXIT": "站点不可达（可能被 WAF 拦截）",
     "NETWORK": "网络不可达",
     "TIMEOUT": "已达本次运行时间预算",
     "CONFIG_ERROR": "配置错误",
@@ -452,7 +400,7 @@ RESULT_MESSAGES = {
 # HTTP 与 AgentRouter 接口
 # ============================================================================
 
-def create_session(config: Config, proxy_url: str = "") -> Session:
+def create_session(config: Config) -> Session:
     """创建一个独立的 requests.Session。
 
     Session 会保存登录过程中收到的 Cookie——AgentRouter 的登录态主要靠
@@ -473,8 +421,6 @@ def create_session(config: Config, proxy_url: str = "") -> Session:
             "Origin": config.base_url,
         }
     )
-    if proxy_url:
-        session.proxies.update({"http": proxy_url, "https": proxy_url})
     return session
 
 
@@ -505,14 +451,15 @@ def parse_json_response(response: Response, endpoint: str) -> dict[str, Any]:
     return payload
 
 
-def probe_exit(config: Config, proxy_url: str, deadline: Deadline) -> dict[str, Any]:
-    """用 ``/api/status`` 试探某个出口是否可用。
+def fetch_site_info(config: Config, deadline: Deadline) -> dict[str, Any]:
+    """调用 ``/api/status`` 确认站点可达，并取回站点信息。
 
-    成功时返回接口的 ``data``（里面含 quota_per_unit 等站点信息），
-    失败时抛 :class:`UpstreamError` 或 requests 的异常。
+    成功返回接口的 ``data``（含 ``quota_per_unit`` 等），失败时抛
+    :class:`UpstreamError` 或 requests 的异常。被 WAF 拦截时异常文本里会
+    出现 ``aliyun_waf``，调用方据此区分「风控拦截」和「网络不通」。
     """
 
-    session = create_session(config, proxy_url)
+    session = create_session(config)
     try:
         response = session.get(
             f"{config.base_url}/api/status",
@@ -527,49 +474,13 @@ def probe_exit(config: Config, proxy_url: str, deadline: Deadline) -> dict[str, 
         session.close()
 
 
-def find_working_exit(
-    config: Config, deadline: Deadline
-) -> tuple[str | None, str, dict[str, Any], str]:
-    """找出能访问 AgentRouter 的网络出口。
+def classify_connection_error(detail: str) -> str:
+    """判断连接失败属于风控拦截（``"waf"``）还是网络不通（``"network"``）。
 
-    顺序：配置的代理（按填写顺序）→ 直连。
-
-    返回 ``(代理 URL, 标签, 站点信息, 失败原因)``。失败原因是 ``""``（成功）、
-    ``"waf"``（被 WAF 拦截）或 ``"network"``（连接层面就不通），
-    调用方据此区分结果码，避免把网关问题误报成风控问题。
+    两者对用户的排查动作完全不同：前者要换网络环境，后者要查断网 / DNS。
     """
 
-    candidates = [(p, proxy_label(p)) for p in config.proxies]
-    candidates.append(("", "direct"))
-
-    saw_waf = False
-    last_error = ""
-    for proxy_url, label in candidates:
-        if deadline.expired():
-            log.warning("时间预算已用尽，停止探测剩余出口")
-            last_error = "时间预算已用尽，未能探测完所有出口"
-            break
-        log.info("测试出口：%s", label)
-        try:
-            data = probe_exit(config, proxy_url, deadline)
-            log.info("出口可用：%s", label)
-            return proxy_url, label, data, ""
-        except (requests.RequestException, UpstreamError) as exc:
-            detail = safe_error(exc)
-            if "waf" in detail.lower():
-                saw_waf = True
-            last_error = detail
-            log.warning("出口不可用 %s：%s", label, detail)
-
-    if saw_waf:
-        log.error(
-            "所有出口都被站点 WAF 拦截。这通常是机房 / 云服务器 IP 被风控导致；"
-            "请换一个非机房的代理出口，或改在本机（家宽）运行。"
-        )
-        return None, "", {}, "waf"
-    if last_error:
-        log.error("所有出口均不可用，最后一个错误：%s", last_error)
-    return None, "", {}, "network"
+    return "waf" if "waf" in detail.lower() else "network"
 
 
 def login_and_checkin(
@@ -644,7 +555,6 @@ def get_balance(
 
 def process_account(
     config: Config,
-    proxy_url: str,
     account: dict[str, str],
     quota_per_unit: int,
     deadline: Deadline,
@@ -657,7 +567,7 @@ def process_account(
         result.error = "已达时间预算，未执行"
         return result
 
-    session = create_session(config, proxy_url)
+    session = create_session(config)
     try:
         user_data, error = login_and_checkin(config, session, account, deadline)
         if error:
@@ -737,9 +647,9 @@ def build_report(results: list[AccountResult], result_code: str) -> str:
         first = results[0]
         return f"登录失败：{first.error[:160]}"
     if result_code == "NO_EXIT":
-        return "找不到可用网络出口，签到未执行（机房 IP 可能被站点 WAF 拦截）"
+        return "站点被 WAF 拦截，签到未执行（若正开着代理，请先关掉试直连）"
     if result_code == "NETWORK":
-        return "网络不可达：所有出口都无法连接站点，签到未执行"
+        return "网络不可达：无法连接站点，签到未执行"
     if result_code == "TIMEOUT":
         return (
             f"已达本次运行时间预算，已成功 {len(successful)} 个账号，"
@@ -756,7 +666,6 @@ def build_payload(
     config: Config,
     results: list[AccountResult],
     result_code: str,
-    exit_label: str = "",
 ) -> dict[str, Any]:
     """组装最终输出：一行 JSON。"""
 
@@ -764,7 +673,6 @@ def build_payload(
         "time": bjt_now(),
         "result": result_code,
         "report": build_report(results, result_code),
-        "exit": exit_label,
     }
     if results:
         successful = [r for r in results if not r.error]
@@ -799,25 +707,30 @@ def run_checkin(config: Config, silent: bool) -> int:
     """auto / silent 的主流程。"""
 
     deadline = Deadline(config.budget_seconds)
-    exit_proxy, exit_label, site_info, failure = find_working_exit(config, deadline)
 
-    if exit_proxy is None:
-        result_code = "NO_EXIT" if failure == "waf" else "NETWORK"
-        reason = (
-            "找不到可用网络出口（机房 IP 可能被站点 WAF 拦截）"
-            if failure == "waf"
-            else "网络不可达，所有出口都无法连接站点"
-        )
-        # 即便出口不可用也照常通知：用户需要知道今天没签成，而不是静默失败。
+    log.info("检查站点可达性：%s", config.base_url)
+    try:
+        site_info = fetch_site_info(config, deadline)
+    except (requests.RequestException, UpstreamError) as exc:
+        detail = safe_error(exc)
+        failure = classify_connection_error(detail)
+        if failure == "waf":
+            log.error(
+                "站点返回 WAF 拦截页。这通常是出口 IP 被风控（机房 IP 会被拦）；"
+                "如果你正开着代理，先关掉试直连——代理出口反而更容易命中风控。"
+            )
+            result_code = "NO_EXIT"
+            reason = "站点被 WAF 拦截（机房出口 IP 常见），请试直连"
+        else:
+            log.error("无法连接站点：%s", detail)
+            result_code = "NETWORK"
+            reason = f"网络不可达，无法连接站点：{detail[:120]}"
+
         results = [
             AccountResult(account=mask_account(account["username"]), error=reason)
             for account in config.accounts
         ]
-        emit(
-            config,
-            build_payload(config, results, result_code, exit_label),
-            silent,
-        )
+        emit(config, build_payload(config, results, result_code), silent)
         return 2
 
     quota_per_unit = site_info.get("quota_per_unit")
@@ -828,12 +741,12 @@ def run_checkin(config: Config, silent: bool) -> int:
     except (TypeError, ValueError):
         quota_per_unit = FALLBACK_QUOTA_PER_UNIT
 
-    log.info("开始签到，共 %d 个账号，换算单位 %d", len(config.accounts), quota_per_unit)
+    log.info("站点可达，开始签到，共 %d 个账号", len(config.accounts))
 
     results: list[AccountResult] = []
     for account in config.accounts:
         results.append(
-            process_account(config, exit_proxy, account, quota_per_unit, deadline)
+            process_account(config, account, quota_per_unit, deadline)
         )
 
     timed_out = deadline.expired()
@@ -842,7 +755,7 @@ def run_checkin(config: Config, silent: bool) -> int:
 
     result_code = judge(results, timed_out)
 
-    payload = build_payload(config, results, result_code, exit_label)
+    payload = build_payload(config, results, result_code)
     emit(config, payload, silent)
     log.info("完成：%s", payload["report"])
 
@@ -854,51 +767,52 @@ def run_checkin(config: Config, silent: bool) -> int:
 
 
 def run_diagnose(config: Config, silent: bool) -> int:
-    """diagnose：逐个探测出口，不登录任何账号。"""
+    """diagnose：只确认站点可达，不登录任何账号。
+
+    用来区分「站点被 WAF 拦」和「本机网络不通」——这两种情况的处理方式
+    完全不同，但终端里都只看到一句「连不上」。
+    """
 
     deadline = Deadline(config.budget_seconds)
-    candidates = [(p, proxy_label(p)) for p in config.proxies]
-    candidates.append(("", "direct"))
+    log.info("探测 %s/api/status", config.base_url)
 
-    lines: list[dict[str, Any]] = []
-    available = 0
-    for proxy_url, label in candidates:
-        if deadline.expired():
-            lines.append({"exit": label, "ok": False, "detail": "时间预算已用尽"})
-            break
-        try:
-            data = probe_exit(config, proxy_url, deadline)
-            available += 1
-            lines.append(
-                {
-                    "exit": label,
-                    "ok": True,
-                    "quota_per_unit": data.get("quota_per_unit"),
-                    "site": data.get("system_name"),
-                }
-            )
-        except (requests.RequestException, UpstreamError) as exc:
-            lines.append({"exit": label, "ok": False, "detail": safe_error(exc)})
+    ok = False
+    detail = ""
+    data: dict[str, Any] = {}
+    try:
+        data = fetch_site_info(config, deadline)
+        ok = True
+    except (requests.RequestException, UpstreamError) as exc:
+        detail = safe_error(exc)
 
-    for row in lines:
-        mark = "OK  " if row["ok"] else "FAIL"
-        detail = (
-            f"quota_per_unit={row.get('quota_per_unit')} site={row.get('site')}"
-            if row["ok"]
-            else row.get("detail", "")
-        )
-        print(f"{mark} {row['exit']}  {detail}")
+    if ok:
+        print(f"OK   站点可达（{config.base_url}）")
+        if data.get("system_name"):
+            print(f"     站点名称：{data['system_name']}")
+        if data.get("quota_per_unit"):
+            print(f"     换算单位：{data['quota_per_unit']} quota = 1 美元")
+    else:
+        print(f"FAIL 无法访问 {config.base_url}")
+        print(f"     {detail}")
+        if classify_connection_error(detail) == "waf":
+            print("     这是 WAF 风控拦截，不是断网。若你正开着代理，先关掉试直连。")
 
     payload = {
         "time": bjt_now(),
-        "result": "OK" if available else "NO_EXIT",
-        "report": f"共 {len(candidates)} 个出口，{available} 个可用",
-        "exits": lines,
+        "result": "OK" if ok else "NO_EXIT",
+        "report": (
+            f"站点可达（{data.get('system_name') or config.base_url}）"
+            if ok
+            else f"站点不可达：{detail[:160]}"
+        ),
+        "reachable": ok,
     }
+    if not ok:
+        payload["failure_kind"] = classify_connection_error(detail)
     if config.warnings:
         payload["config_warning"] = config.warnings
     emit(config, payload, silent)
-    return 0 if available else 2
+    return 0 if ok else 2
 
 
 # ============================================================================
@@ -910,7 +824,7 @@ def usage() -> str:
         "用法：python signin.py [auto|silent|diagnose]\n"
         "  auto      签到 + 查余额 + 通知，结果打到 stdout（默认）\n"
         "  silent    同上，但结果写入日志文件，配合系统定时任务使用\n"
-        "  diagnose  只探测网络出口，不登录任何账号\n"
+        "  diagnose  只确认站点是否可达，不登录任何账号\n"
     )
 
 
