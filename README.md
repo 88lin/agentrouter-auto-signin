@@ -20,6 +20,9 @@ AgentRouter 的签到没有独立接口——**登录动作本身就会触发当
 - 一天只算一次积分，重复运行不会多领
 - 支持多账号，每个账号独立会话，一个失败不影响其他
 - 结果一行 JSON：`result` 给程序看，`report` 给人看
+- 支持 Win / macOS / Linux 定时任务，静默运行、错过后自动补签
+
+> 👤 作者：[88lin](https://github.com/88lin) · 📦 仓库：[github.com/88lin/agentrouter-auto-signin](https://github.com/88lin/agentrouter-auto-signin)
 
 ## 💖 赞助商
 
@@ -129,11 +132,23 @@ python signin.py auto         # 正式签到
 
 ## ⏰ 挂上定时任务
 
-脚本每天会建两个任务，时间分别是 **08:10** 和 **20:10**。
+三个平台都把签到安排在 **08:10** 和 **20:10** 两个时间点。
 
 > 每日签到在**凌晨 00:00 重置到第二天**，一天只算一次，重复运行不加积分。
 > 所以 **08:10 那次签当天**，**20:10 是兜底**——专门应付早上电脑没开机的情况。
 > 多跑一次成本几乎为零，但能避免整天漏签。
+
+### 📌 错过后会不会自动补签
+
+会，三个平台都做了安排：
+
+| 平台 | 机制 | 补签时机 |
+|---|---|---|
+| 🪟 Windows | 任务开了「**错过后尽快补跑**」（`StartWhenAvailable`） | 下次开机并登录后自动跑一次 |
+| 🍎 macOS | launchd 的 `RunAtLoad`，并在睡眠恢复时补跑错过的时刻 | 开机登录 / 唤醒后 |
+| 🐧 Linux | cron 单条 `@reboot` + 两个固定时间点 | 开机约 1 分钟后 |
+
+> Linux 的普通 cron **不会**补跑错过的任务，所以下面给了 `@reboot` 那一行。
 
 ### 🪟 Windows
 
@@ -149,6 +164,10 @@ powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
 | `AgentRouterRetrySignin` | 每天 20:10 | 兜底重试 |
 
 装完会打印下次运行时间。查看日志 `Get-Content checkin.log -Tail 5`。
+
+> [!NOTE]
+> 任务以「当前用户登录时运行」注册，不需要管理员权限、也不用存密码。所以补跑发生在
+> **下次开机并登录之后**——这也是它不加 `-User`/密码的原因。
 
 卸载：
 
@@ -177,9 +196,12 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/agentrouter-auto-signin.
 ### 🐧 Linux
 
 ```cron
+@reboot     sleep 60 && cd /path/to/agentrouter-auto-signin && /usr/bin/python3 signin.py silent
 10 8 * * *  cd /path/to/agentrouter-auto-signin && /usr/bin/python3 signin.py silent
 10 20 * * * cd /path/to/agentrouter-auto-signin && /usr/bin/python3 signin.py silent
 ```
+
+第一行是开机补签：`sleep 60` 等网络就绪。crond 不会补跑错过的任务，所以这一行是必要的。
 
 ---
 

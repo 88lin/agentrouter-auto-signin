@@ -60,9 +60,10 @@
         </dict>
     </array>
 
-    <!-- 登录时不立即补跑，交给上面的时间点即可；想要「开机就补一次」改成 true -->
+    <!-- 登录时也跑一次：如果 08:10 / 20:10 那两个时间点机器正好关机，
+         这一次就是补签的机会。脚本幂等，多跑不会重复计分。 -->
     <key>RunAtLoad</key>
-    <false/>
+    <true/>
 
     <key>StandardOutPath</key>
     <string>/tmp/agentrouter-auto-signin.out</string>

@@ -162,6 +162,9 @@ foreach ($name in @($TaskDaily, $TaskRetry)) {
 }
 
 Write-Host ""
+Write-Host "两个任务都开启了「错过后尽快补跑」：如果 08:10 / 20:10 机器正好关机，" -ForegroundColor Cyan
+Write-Host "下次开机（并登录）后会自动补跑一次，不会整天漏签。" -ForegroundColor Cyan
+Write-Host ""
 Write-Host "查看日志" -ForegroundColor Cyan
 Write-Host "  Get-Content checkin.log -Tail 5    # 每行一条 JSON" -ForegroundColor DarkGray
 Write-Host ""

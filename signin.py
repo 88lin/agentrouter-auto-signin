@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """AgentRouter 每日自动签到（本地版）。
 
+作者：88lin
+仓库：https://github.com/88lin/agentrouter-auto-signin
+
 一个自包含的单文件脚本，在你自己的电脑上静默运行，每天自动完成 AgentRouter
 的登录签到并查回余额。
 
