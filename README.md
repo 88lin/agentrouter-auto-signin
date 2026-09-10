@@ -109,6 +109,22 @@ python signin.py auto         # 正式签到
 
 看到 `"result": "OK"`、`report` 里报出余额，就通了。之后挂上定时任务即可。
 
+> [!TIP]
+> **懒人一键**：不想手动敲命令，把下面这段连同仓库链接发给你的 AI 助手即可，
+> 它会自己 clone、装依赖、建配置、注册定时任务、跑验证：
+>
+> ```text
+> 帮我 clone 并设置好这个仓库：https://github.com/88lin/agentrouter-auto-signin
+> 1. 安装依赖：python -m pip install -r requirements.txt
+> 2. 把 config.example.json 复制成 config.json，账号密码填：邮箱=___，密码=___
+>    （如果我不想把密码贴进对话，这一步我自己编辑 config.json，你跳过即可）
+> 3. Windows 运行 install-windows.ps1 注册每天 08:10 / 20:10 的定时任务；
+>    macOS 按 agentrouter-auto-signin.plist.example 配好 launchd
+> 4. 依次运行 python signin.py diagnose 和 python signin.py auto，汇报结果
+> ```
+>
+> 提醒：第 2 步的密码会出现在对话记录里，介意就自己填 config.json。
+
 ---
 
 ## 🌐 站点域名
