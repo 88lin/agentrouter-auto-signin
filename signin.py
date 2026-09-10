@@ -63,7 +63,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = SCRIPT_DIR / "config.json"
 DEFAULT_LOG_PATH = SCRIPT_DIR / "checkin.log"
 
-# 通知和日志统一使用北京时间（UTC+8）。
+# 日志与输出统一使用北京时间（UTC+8）。
 BEIJING_TZ = timezone(timedelta(hours=8))
 
 # quota 换算单位的兜底值。正常情况下会优先采用站点 ``/api/status``
@@ -343,7 +343,7 @@ CONFIG_REF: list[Config | None] = [None]
 
 
 def bjt_now() -> str:
-    """北京时间字符串，用于日志和通知。"""
+    """北京时间字符串，用于日志和输出。"""
 
     return datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -365,7 +365,7 @@ def quota_to_usd(quota: Any, quota_per_unit: int) -> float:
 class AccountResult:
     """单个账号的签到结果。
 
-    account      脱敏后的用户名
+    account      脱敏后的用户名（构造时强制脱敏，任何路径都不可能泄露完整账号）
     checked_in   站点登录响应里的 checked_in 原始值。该字段恒为 true，
                  判断不出当天是否首次签到，仅作数据保留
     balance_usd  按 quota 折算的美元余额
@@ -378,6 +378,10 @@ class AccountResult:
     balance_usd: float = 0.0
     error: str = ""
     warning: str = ""
+
+    def __post_init__(self) -> None:
+        # 脱敏是硬约束而不是调用方自觉：谁构造它，账号都会被遮住。
+        self.account = mask_account(self.account)
 
 
 # ============================================================================
@@ -743,7 +747,7 @@ def run_checkin(config: Config, silent: bool) -> int:
     emit(config, payload, silent)
     log.info("完成：%s", payload["report"])
 
-    if result_code in ("OK", "ALREADY"):
+    if result_code == "OK":
         return 0
     if result_code == "PARTIAL":
         return 1
@@ -814,6 +818,15 @@ def usage() -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
+
+    # Windows 控制台/重定向场景的编码是 GBK，个别字符打印会直接崩；
+    # 统一按 UTF-8 输出（pythonw 下 stream 为 None，跳过即可）。
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
 
     if args and args[0] in ("-h", "--help", "help"):
         print(usage())
