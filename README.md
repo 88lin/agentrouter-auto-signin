@@ -14,16 +14,13 @@
 
 </div>
 
-> 一个自包含的 Python 脚本，每天自动登录 AgentRouter、触发当日签到、查回余额，可选推送到微信。
+> 一个自包含的 Python 脚本，每天自动登录 AgentRouter、触发当日签到、查回余额，结果落成一行 JSON 或写进日志。
 > 配置只放在本机的 `config.json` 里，仓库不含任何凭据，可安全分享。
 >
 > 👤 作者：[88lin](https://github.com/88lin) · 📦 仓库：[github.com/88lin/agentrouter-auto-signin](https://github.com/88lin/agentrouter-auto-signin)
 
 > [!TIP]
 > **⭐ 顺手点个 Star 再往下看**——AgentRouter 的签到接口来自站点前端，站点改一版它就可能失效，修复都会第一时间推到这里。Star 一下，等哪天签到莫名其妙断了，你能一秒翻回这个仓库。
-
-> [!IMPORTANT]
-> **本项目只支持在本机运行**，不提供 GitHub Actions 方案。原因是 AgentRouter 使用阿里云 WAF，会拦截机房 / 云服务器出口 IP——跑在 GitHub 托管运行器上必然被拦，配代理又得是住宅出口，绕的弯不值得。本机（家宽）一般可以直接连通。
 
 ## 💖 赞助商
 
@@ -73,10 +70,9 @@
 | 🧮 | **余额自动换算** —— 从站点 `/api/status` 读取 `quota_per_unit`，站点改比例也不会算错 |
 | 🩺 | **诊断模式** —— `diagnose` 一条命令测出哪个出口可用，不用盲猜 |
 | 📣 | **一行 JSON** —— `result` 给程序看，`report` 给人看，便于接任何汇报方式 |
-| 💬 | **微信推送** —— 可选接入 PushPlus，签到完推一条 HTML 汇总 |
 | ⏰ | **双定时模式** —— AI 自动化（跨平台）或系统级静默（Win 一键脚本 / macOS launchd / Linux cron） |
 | 🛡️ | **异常不静默吞** —— 任何异常都会落成一条结果记录，不会悄悄消失 |
-| 🕵️ | **自动脱敏** —— 日志与通知里账号只留前 4 位，密码 / 代理凭据替换为 `***` |
+| 🕵️ | **自动脱敏** —— 日志里账号只留前 4 位，密码 / 代理凭据替换为 `***` |
 
 ---
 
@@ -181,7 +177,7 @@ powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
 
 | 任务 | 频率 | 干什么 |
 |---|---|---|
-| `AgentRouterAutoSignin` | 每天 08:10 | 签到 + 查余额 + 通知，静默写 `checkin.log` |
+| `AgentRouterAutoSignin` | 每天 08:10 | 签到 + 查余额，静默写 `checkin.log` |
 | `AgentRouterRetrySignin` | 每天 20:10 | 兜底重试 |
 
 > [!NOTE]
@@ -240,7 +236,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/agentrouter-auto-signin.
 
 ```bash
 python signin.py            # 等同 auto
-python signin.py auto       # 签到 + 查余额 + 通知，结果打到 stdout
+python signin.py auto       # 签到 + 查余额，结果打到 stdout
 python signin.py silent     # 同上，但结果写入 checkin.log
 python signin.py diagnose   # 只探测网络出口，不登录任何账号
 python signin.py --help     # 看用法
@@ -279,12 +275,7 @@ AgentRouter 基于 New-API 类后端，**登录动作本身就会触发当日签
 | `base_url` | `AGENTROUTER_BASE_URL` | `https://agentrouter.org` | 站点地址，一般不用改 |
 | `accounts` | `AGENTROUTER_ACCOUNTS`<br>`AGENTROUTER_ACCOUNTS_JSON` | 无（必填） | 账号数组。环境变量写法见下 |
 | `proxies` | `AGENTROUTER_PROXIES` | `[]` | 代理列表，留空即直连 |
-| `pushplus.token` | `PUSHPLUS_TOKEN` | `""` | 留空则不推送，签到照常执行 |
-| `pushplus.topic` | `PUSHPLUS_TOPIC` | `""` | PushPlus 群组编码，可选 |
-| `pushplus.title` | — | `AgentRouter 签到通知` | 推送标题 |
-| `pushplus.template` | — | `html` | 推送模板，支持 `html` / `txt` / `markdown` / `json` |
 | `request_timeout` | `AGENTROUTER_REQUEST_TIMEOUT` | `25` | 单次请求超时（秒），夹到 5–120 |
-| `pushplus_timeout` | `AGENTROUTER_PUSHPLUS_TIMEOUT` | `15` | 推送请求超时（秒），夹到 5–60 |
 | `budget_seconds` | `AGENTROUTER_BUDGET_SECONDS` | `300` | 单次运行总预算（秒），夹到 30–540 |
 | — | `AGENTROUTER_CONFIG` | 脚本同目录 `config.json` | 指定配置文件路径 |
 | — | `AGENTROUTER_LOG` | 脚本同目录 `checkin.log` | 指定日志文件路径 |
@@ -343,7 +334,7 @@ http://用户名:密码@代理地址:端口
 
 - 仓库不含、不内嵌、不传输任何第三方凭据；账号密码只存在于**你自己本机**的 `config.json` 里
 - `config.json` 已在 `.gitignore` 中——**别把它提交到任何仓库**，也别贴到聊天记录里
-- 日志与通知里账号只保留前 4 位（`alic*****`）；发生异常时，脚本会把密码、PushPlus Token、代理账密从错误信息里替换成 `***`（只替换长度 ≥ 4 的片段，避免误伤正常文本）
+- 日志里账号只保留前 4 位（`alic*****`）；发生异常时，脚本会把密码、代理账密从错误信息里替换成 `***`（只替换长度 ≥ 4 的片段，避免误伤正常文本）
 - 脚本只作用于**你自己的**账号，可安全 fork、分享
 
 ---
@@ -357,8 +348,7 @@ http://用户名:密码@代理地址:端口
 
 ## 📊 Star History
 
-> 等 star 攒起来之后再补这块曲线图（需要额外配置 `STAR_HISTORY_TOKEN` 并跑一次 Actions）。
-> 现在先把位置留给一句话：
+> 等 star 攒起来之后再补这块曲线图。现在先把位置留给一句话：
 
 <div align="center">
 

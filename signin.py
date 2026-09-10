@@ -2,7 +2,7 @@
 """AgentRouter 每日自动签到（本地版）。
 
 一个自包含的单文件脚本，在你自己的电脑上静默运行，每天自动完成 AgentRouter
-的登录签到、查询余额，并可通过 PushPlus 推送到微信。
+的登录签到并查回余额。
 
 核心流程：
 
@@ -11,12 +11,12 @@
 3. 每个账号使用独立 Session 调用 ``POST /api/user/login`` 登录。
 4. AgentRouter 的登录动作本身就会触发当日签到，无需额外签到接口。
 5. 调用 ``GET /api/user/self`` 查询余额，按站点公布的换算单位折成美元。
-6. 汇总成一行 JSON 输出（或写入日志文件），可选推送 PushPlus。
+6. 汇总成一行 JSON 输出（或写入日志文件）。
 
 用法：
 
     python signin.py             # 等同 auto
-    python signin.py auto        # 签到 + 查余额 + 通知，结果打到 stdout
+    python signin.py auto        # 签到 + 查余额，结果打到 stdout
     python signin.py silent      # 同上，但结果写入日志文件（配合系统定时任务）
     python signin.py diagnose    # 只探测网络出口，不登录任何账号
 
@@ -33,7 +33,6 @@
 
 from __future__ import annotations
 
-import html
 import json
 import logging
 import os
@@ -108,12 +107,7 @@ class Config:
     base_url: str = "https://agentrouter.org"
     accounts: list[dict[str, str]] = field(default_factory=list)
     proxies: list[str] = field(default_factory=list)
-    pushplus_token: str = ""
-    pushplus_topic: str = ""
-    pushplus_title: str = "AgentRouter 签到通知"
-    pushplus_template: str = "html"
     request_timeout: int = 25
-    pushplus_timeout: int = 15
     budget_seconds: int = DEFAULT_BUDGET_SECONDS
     log_path: Path = DEFAULT_LOG_PATH
     config_path: Path = DEFAULT_CONFIG_PATH
@@ -220,10 +214,7 @@ def load_config(config_path: Path | None = None) -> Config:
         代理列表        AGENTROUTER_PROXIES
         站点地址        AGENTROUTER_BASE_URL
         请求超时        AGENTROUTER_REQUEST_TIMEOUT
-        推送超时        AGENTROUTER_PUSHPLUS_TIMEOUT
         时间预算        AGENTROUTER_BUDGET_SECONDS
-        PushPlus Token  PUSHPLUS_TOKEN
-        PushPlus 群组   PUSHPLUS_TOPIC
     """
 
     warnings: list[str] = []
@@ -281,30 +272,10 @@ def load_config(config_path: Path | None = None) -> Config:
     else:
         config.proxies = _parse_proxies(raw.get("proxies"))
 
-    # ---- PushPlus ----
-    pushplus = raw.get("pushplus") if isinstance(raw.get("pushplus"), dict) else {}
-    config.pushplus_token = _env("PUSHPLUS_TOKEN") or str(
-        pushplus.get("token") or ""
-    ).strip()
-    config.pushplus_topic = _env("PUSHPLUS_TOPIC") or str(
-        pushplus.get("topic") or ""
-    ).strip()
-    config.pushplus_title = str(
-        pushplus.get("title") or Config.pushplus_title
-    ).strip()
-    config.pushplus_template = str(
-        pushplus.get("template") or Config.pushplus_template
-    ).strip()
-
     # ---- 超时与预算 ----
     config.request_timeout = _env_int(
         "AGENTROUTER_REQUEST_TIMEOUT",
         int(raw.get("request_timeout") or Config.request_timeout),
-        warnings,
-    )
-    config.pushplus_timeout = _env_int(
-        "AGENTROUTER_PUSHPLUS_TIMEOUT",
-        int(raw.get("pushplus_timeout") or Config.pushplus_timeout),
         warnings,
     )
     config.budget_seconds = _env_int(
@@ -315,9 +286,6 @@ def load_config(config_path: Path | None = None) -> Config:
 
     config.request_timeout = _clamp(
         config.request_timeout, 5, 120, "request_timeout", warnings
-    )
-    config.pushplus_timeout = _clamp(
-        config.pushplus_timeout, 5, 60, "pushplus_timeout", warnings
     )
     config.budget_seconds = _clamp(
         config.budget_seconds, 30, MAX_BUDGET_SECONDS, "budget_seconds", warnings
@@ -410,7 +378,6 @@ def safe_error(error: object) -> str:
                 secrets.append(parsed.username)
             if parsed.password:
                 secrets.append(parsed.password)
-        secrets.append(config.pushplus_token)
         secrets.extend(
             str(account.get("password", "")) for account in config.accounts
         )
@@ -706,96 +673,6 @@ def process_account(
 
 
 # ============================================================================
-# 通知
-# ============================================================================
-
-def build_notification(results: list[AccountResult]) -> str:
-    """生成 PushPlus 用的 HTML 通知正文。"""
-
-    successful = [r for r in results if not r.error]
-    total_balance = sum(r.balance_usd for r in successful)
-    lines = [
-        "<b>AgentRouter 签到通知</b>",
-        "----------------",
-        f"📅 <b>日期</b>：{html.escape(bjt_date())}",
-        f"✅ <b>账号数</b>：{len(results)}",
-        "----------------",
-    ]
-    for result in results:
-        lines.append(f"👉 账号：{html.escape(result.account)}")
-        if result.error:
-            lines.append(f"   ❌ 失败：{html.escape(result.error[:240])}")
-        elif result.checked_in:
-            lines.append(f"   🎉 签到成功，余额 ${result.balance_usd:,.2f}")
-        else:
-            lines.append(f"   ✅ 今日已签到，余额 ${result.balance_usd:,.2f}")
-        if result.warning:
-            lines.append(f"   ⚠️ {html.escape(result.warning[:240])}")
-    lines.extend(["----------------", f"💰 <b>总余额</b>：${total_balance:,.2f}"])
-    return "\n".join(lines)
-
-
-def send_notification(config: Config, results: list[AccountResult], deadline: Deadline) -> bool:
-    """发送 PushPlus 汇总通知。
-
-    未配置 Token 时跳过。通知失败只记日志，不会撤销已完成的签到。
-    PushPlus 返回 ``code == 200`` 表示服务端已接收请求，不代表微信已完成投递。
-    """
-
-    if not config.pushplus_token:
-        log.info("未配置 PushPlus Token，跳过通知")
-        return False
-
-    payload: dict[str, Any] = {
-        "token": config.pushplus_token,
-        "title": config.pushplus_title,
-        "content": build_notification(results),
-        "template": config.pushplus_template,
-    }
-    if config.pushplus_topic:
-        payload["topic"] = config.pushplus_topic
-
-    try:
-        response = requests.post(
-            "https://www.pushplus.plus/send",
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=deadline.remaining(config.pushplus_timeout),
-        )
-    except requests.RequestException as exc:
-        log.error("PushPlus 通知失败：%s", safe_error(exc))
-        return False
-
-    try:
-        body = response.json()
-    except ValueError as exc:
-        log.error(
-            "PushPlus 通知失败：HTTP %s，响应不是 JSON（%s）",
-            getattr(response, "status_code", "?"),
-            safe_error(exc),
-        )
-        return False
-
-    if (
-        isinstance(body, dict)
-        and body.get("code") == 200
-        and response.status_code < 400
-    ):
-        log.info("PushPlus 通知已受理")
-        return True
-
-    if isinstance(body, dict):
-        detail = (
-            f"HTTP {getattr(response, 'status_code', '?')}，"
-            f"code {body.get('code', '?')}：{body.get('msg', '未知错误')}"
-        )
-    else:
-        detail = f"HTTP {getattr(response, 'status_code', '?')}：响应结构异常"
-    log.error("PushPlus 通知失败：%s", safe_error(detail))
-    return False
-
-
-# ============================================================================
 # 汇总与输出
 # ============================================================================
 
@@ -880,7 +757,6 @@ def build_payload(
     results: list[AccountResult],
     result_code: str,
     exit_label: str = "",
-    notification_sent: bool = False,
 ) -> dict[str, Any]:
     """组装最终输出：一行 JSON。"""
 
@@ -896,8 +772,6 @@ def build_payload(
         payload["total_balance_usd"] = round(
             sum(r.balance_usd for r in successful), 2
         )
-    if notification_sent:
-        payload["notification_sent"] = True
     if config.warnings:
         payload["config_warning"] = config.warnings
     return payload
@@ -939,14 +813,9 @@ def run_checkin(config: Config, silent: bool) -> int:
             AccountResult(account=mask_account(account["username"]), error=reason)
             for account in config.accounts
         ]
-        notification_sent = False
-        try:
-            notification_sent = send_notification(config, results, deadline)
-        except Exception as exc:
-            log.error("发送通知时出现异常：%s", safe_error(exc))
         emit(
             config,
-            build_payload(config, results, result_code, exit_label, notification_sent),
+            build_payload(config, results, result_code, exit_label),
             silent,
         )
         return 2
@@ -972,13 +841,8 @@ def run_checkin(config: Config, silent: bool) -> int:
         log.warning("时间预算已用尽，部分账号可能未处理")
 
     result_code = judge(results, timed_out)
-    notification_sent = False
-    try:
-        notification_sent = send_notification(config, results, deadline)
-    except Exception as exc:  # 通知是附加动作，任何异常都不该影响退出码
-        log.error("发送通知时出现异常：%s", safe_error(exc))
 
-    payload = build_payload(config, results, result_code, exit_label, notification_sent)
+    payload = build_payload(config, results, result_code, exit_label)
     emit(config, payload, silent)
     log.info("完成：%s", payload["report"])
 

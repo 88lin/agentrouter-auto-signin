@@ -6,11 +6,5 @@
       "password": "your-password"
     }
   ],
-  "proxies": [],
-  "pushplus": {
-    "token": "",
-    "topic": "",
-    "title": "AgentRouter 签到通知",
-    "template": "html"
-  }
+  "proxies": []
 }
