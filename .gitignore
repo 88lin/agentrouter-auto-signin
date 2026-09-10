@@ -1,0 +1,23 @@
+# 本地环境变量文件（含账号密码，切勿提交）
+.env
+.env.*
+!.env.example
+
+# 本地私有配置
+config.local.py
+*.local.py
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

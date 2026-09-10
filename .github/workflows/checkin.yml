@@ -1,0 +1,53 @@
+name: AgentRouter 每日签到
+
+# 触发方式：
+#   1. 定时任务（GitHub Actions 的 cron 使用 UTC 时间）
+#      10 0 * * *  -> 北京时间 08:10
+#      10 6 * * *  -> 北京时间 14:10（兜底，防止首次运行被延迟或丢弃）
+#   2. 手动触发：仓库页面 Actions -> 选择本工作流 -> Run workflow
+on:
+  schedule:
+    - cron: "10 0 * * *"
+    - cron: "10 6 * * *"
+  workflow_dispatch:
+
+# 只读权限即可，签到本身不需要写仓库。
+permissions:
+  contents: read
+
+# 同一时间只跑一个签到任务，避免多账号并发登录互相干扰。
+concurrency:
+  group: agentrouter-checkin
+  cancel-in-progress: false
+
+jobs:
+  checkin:
+    name: 签到
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: 拉取仓库
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: 执行签到
+        # 所有敏感信息均来自 Repository secrets，脚本本身不含任何凭据。
+        env:
+          AR_ACCOUNTS: ${{ secrets.AR_ACCOUNTS }}
+          AR_ACCOUNTS_JSON: ${{ secrets.AR_ACCOUNTS_JSON }}
+          AR_PROXIES: ${{ secrets.AR_PROXIES }}
+          AR_BASE_URL: ${{ vars.AR_BASE_URL }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          PUSHPLUS_TOPIC: ${{ secrets.PUSHPLUS_TOPIC }}
+        run: python agentrouter_checkin.py
