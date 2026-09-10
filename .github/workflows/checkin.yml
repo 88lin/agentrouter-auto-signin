@@ -28,10 +28,10 @@ jobs:
 
     steps:
       - name: 拉取仓库
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: 安装 Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -43,6 +43,10 @@ jobs:
 
       - name: 执行签到
         # 所有敏感信息均来自 Repository secrets，脚本本身不含任何凭据。
+        #
+        # 注意 AR_PROXIES：AgentRouter 使用阿里云 WAF，会拦截机房 IP，
+        # 而 GitHub 托管运行器就是机房 IP。不配置代理会直接报
+        # "blocked by Aliyun WAF"，签到无法完成。
         env:
           AR_ACCOUNTS: ${{ secrets.AR_ACCOUNTS }}
           AR_ACCOUNTS_JSON: ${{ secrets.AR_ACCOUNTS_JSON }}

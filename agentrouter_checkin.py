@@ -17,6 +17,12 @@
 日志写到标准错误，机器可读的 JSON 结果写到标准输出，
 这样可以分别被 GitHub Actions 日志和后续步骤消费。
 
+⚠️ 网络出口说明：
+    AgentRouter 使用阿里云 WAF，会拦截机房 / 云服务器出口 IP。
+    GitHub Actions 的托管运行器正是机房 IP，因此**必须**通过 AR_PROXIES
+    配置一个非机房出口的代理，否则脚本会在连接探测阶段就失败。
+    想先确认哪个出口可用，可以运行：``python agentrouter_checkin.py --diagnose``
+
 退出码：
     0  全部账号签到成功
     1  部分账号失败
@@ -47,6 +53,11 @@ except ImportError:  # pragma: no cover - 只在依赖缺失时触发
     raise
 
 
+# 模块级 logger。这里提前获取，让下面的配置读取函数也能写日志；
+# 真正的 handler 由后面的 logging.basicConfig 配置到 root logger 上。
+log = logging.getLogger("agentrouter")
+
+
 # ============================================================================
 # 配置区域（全部来自环境变量，可安全公开本文件）
 # ============================================================================
@@ -58,7 +69,9 @@ except ImportError:  # pragma: no cover - 只在依赖缺失时触发
 #   AR_ACCOUNTS_JSON 可选。JSON 数组，优先级高于 AR_ACCOUNTS。
 #                    格式：[{"username": "...", "password": "..."}]
 #   AR_BASE_URL      可选。站点地址，默认 https://agentrouter.org
-#   AR_PROXIES       可选。多行或逗号分隔的代理列表，留空表示直连。
+#   AR_PROXIES       强烈建议配置。多行或逗号分隔的代理列表，留空表示直连。
+#                    GitHub Actions 的机房 IP 会被站点 WAF 拦截，必须提供
+#                    一个非机房出口的代理才能签到。
 #   PUSHPLUS_TOKEN   可选。留空则跳过通知，签到流程照常执行。
 #   PUSHPLUS_TOPIC   可选。PushPlus 群组编码。
 #
@@ -74,6 +87,19 @@ def _env(name: str, default: str = "") -> str:
         return default
     value = value.strip()
     return value or default
+
+
+def _env_int(name: str, default: int) -> int:
+    """读取整数型环境变量，值非法时回退到默认值。"""
+
+    raw = _env(name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        log.warning("%s 不是合法整数（%r），改用默认值 %d", name, raw, default)
+        return default
 
 
 def load_accounts() -> list[dict[str, str]]:
@@ -140,10 +166,10 @@ PUSHPLUS_TITLE = _env("PUSHPLUS_TITLE", "AgentRouter 签到通知")
 PUSHPLUS_TEMPLATE = _env("PUSHPLUS_TEMPLATE", "html")
 
 # AgentRouter 请求的最长等待时间，单位为秒。连接和读取共用该值。
-REQUEST_TIMEOUT = int(_env("AR_REQUEST_TIMEOUT", "25"))
+REQUEST_TIMEOUT = _env_int("AR_REQUEST_TIMEOUT", 25)
 
 # PushPlus 请求的最长等待时间，单位为秒。
-PUSHPLUS_TIMEOUT = int(_env("AR_PUSHPLUS_TIMEOUT", "15"))
+PUSHPLUS_TIMEOUT = _env_int("AR_PUSHPLUS_TIMEOUT", 15)
 
 # AgentRouter 的 quota 与美元余额之间的换算单位。
 # 原项目使用的换算规则是：500000 quota = 1 美元。
@@ -179,7 +205,6 @@ for handler in logging.getLogger().handlers:
     handler.setFormatter(
         BeijingFormatter("%(asctime)s [%(levelname)s] %(message)s")
     )
-log = logging.getLogger("agentrouter")
 
 
 @dataclass
@@ -448,11 +473,16 @@ def find_working_proxy() -> tuple[str | None, str]:
     顺序是配置顺序，直连永远放在最后。这里只调用状态接口，不涉及任何
     账号登录。找到可用出口后，主流程会为每个账号单独创建 Session，
     复用同一个代理 URL。
+
+    如果所有出口都被站点 WAF 拦截（GitHub Actions 的托管运行器属于机房
+    IP，会被风控），这里会打印一条明确的排查提示，而不是只丢一个错误码。
     """
 
     attempts = [(proxy, proxy_label(proxy)) for proxy in parse_proxies(PROXIES)]
     attempts.append(("", "direct"))
 
+    saw_waf = False
+    last_error = ""
     for proxy_url, label in attempts:
         session = create_session(proxy_url)
         log.info("testing AgentRouter connection via %s", label)
@@ -468,9 +498,22 @@ def find_working_proxy() -> tuple[str | None, str]:
                 return proxy_url, label
             log.warning("%s did not report success", label)
         except (requests.RequestException, UpstreamError) as exc:
-            log.warning("connection failed via %s: %s", label, safe_error(exc))
+            detail = safe_error(exc)
+            if "aliyun waf" in detail.lower():
+                saw_waf = True
+            last_error = detail
+            log.warning("connection failed via %s: %s", label, detail)
         finally:
             session.close()
+
+    if saw_waf:
+        log.error(
+            "所有出口都被站点 WAF 拦截。这通常是机房 / 云服务器 IP 被风控导致："
+            "GitHub Actions 的托管运行器属于机房 IP，因此必须通过 AR_PROXIES "
+            "配置一个非机房的代理出口，或改用自建（self-hosted）运行器。"
+        )
+    elif last_error:
+        log.error("所有出口均不可用，最后一个错误：%s", last_error)
 
     return None, ""
 
@@ -749,8 +792,56 @@ def write_step_summary(results: list[AccountResult], proxy_label_used: str) -> N
 # 主流程和退出码
 # ============================================================================
 
-def main() -> int:
+def diagnose() -> int:
+    """只探测网络出口，不登录任何账号。
+
+    排查代理是否可用时非常有用：它会对配置的每个代理以及直连各发一次
+    ``GET /api/status``，逐行打印结果。成功（``success: true``）的出口才能
+    用于正式签到。
+
+    用法：``python agentrouter_checkin.py --diagnose``
+    """
+
+    if not BASE_URL.startswith("https://"):
+        log.error("AR_BASE_URL 必须使用 https://")
+        return 2
+
+    candidates = parse_proxies(PROXIES) + [""]
+    log.info("诊断模式：只测试连接，不会登录任何账号（共 %d 个出口）", len(candidates))
+
+    available = 0
+    for proxy_url in candidates:
+        label = proxy_label(proxy_url)
+        session = create_session(proxy_url)
+        try:
+            response = session.get(
+                f"{BASE_URL}/api/status",
+                timeout=REQUEST_TIMEOUT,
+            )
+            payload = parse_json_response(response, "/api/status")
+            if payload.get("success") is True:
+                available += 1
+                print(f"OK    {label}")
+            else:
+                print(f"FAIL  {label}  (success != true)")
+        except (requests.RequestException, UpstreamError) as exc:
+            print(f"FAIL  {label}  {safe_error(exc)}")
+        finally:
+            session.close()
+
+    if available:
+        log.info("诊断完成：%d 个出口可用，可以正常签到", available)
+        return 0
+    log.error("诊断完成：没有可用出口，请更换 AR_PROXIES 中的代理")
+    return 2
+
+
+def main(argv: list[str] | None = None) -> int:
     """脚本入口，返回进程退出码。"""
+
+    args = sys.argv[1:] if argv is None else argv
+    if "--diagnose" in args or "-d" in args:
+        return diagnose()
 
     try:
         validate_config()
