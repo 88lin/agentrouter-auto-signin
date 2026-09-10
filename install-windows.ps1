@@ -8,7 +8,7 @@
 
     它会自动建好两个计划任务（都用 pythonw.exe 静默运行，不弹窗口）：
 
-        AgentRouterAutoSignin   每天 08:10   签到 + 查余额 + 通知
+        AgentRouterAutoSignin   每天 08:10   签到 + 查余额
         AgentRouterRetrySignin  每天 20:10   兜底重试
 
     为什么要有第二个任务：站点没有公开每日签到的重置时点，而且电脑可能
@@ -111,8 +111,15 @@ Write-Host $Pythonw -ForegroundColor Green
 # ---------------------------------------------------------------- 检查依赖
 $Python = Join-Path (Split-Path -Parent $Pythonw) "python.exe"
 if (Test-Path -LiteralPath $Python) {
-    & $Python -c "import requests" 2>$null
-    if ($LASTEXITCODE -ne 0) {
+    # 原生命令往 stderr 写内容时，配合全局 Stop 策略在部分 PowerShell 版本上
+    # 会被引擎当成错误抛出，这里临时降为 Continue，只信任退出码。
+    $prevPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & $Python -c "import requests" 2>$null | Out-Null
+    $requestsReady = ($LASTEXITCODE -eq 0)
+    $ErrorActionPreference = $prevPreference
+
+    if (-not $requestsReady) {
         Write-Host ""
         Write-Host "缺少依赖 requests。" -ForegroundColor Red
         Write-Host "请先在仓库目录执行：" -ForegroundColor Yellow

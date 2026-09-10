@@ -68,7 +68,7 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 # 返回的 ``quota_per_unit``，站点调整比例时脚本会自动跟随。
 FALLBACK_QUOTA_PER_UNIT = 500000
 
-# 单次运行的网络时间预算默认值（秒）。防止代理挂掉时请求逐个超时，
+# 单次运行的网络时间预算默认值（秒）。防止网络严重超时时请求逐个挂死，
 # 把系统计划任务拖到被强杀，导致当天记录整条丢失。
 DEFAULT_BUDGET_SECONDS = 300
 MAX_BUDGET_SECONDS = 540
@@ -345,12 +345,6 @@ def bjt_now() -> str:
     return datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def bjt_date() -> str:
-    """北京时间日期，用于通知标题。"""
-
-    return datetime.now(BEIJING_TZ).strftime("%Y年%m月%d日")
-
-
 def quota_to_usd(quota: Any, quota_per_unit: int) -> float:
     """把 quota 换算成美元，保留两位小数。无法识别时返回 0.0。"""
 
@@ -380,20 +374,6 @@ class AccountResult:
     balance_usd: float = 0.0
     error: str = ""
     warning: str = ""
-
-
-# 结果码，与一行 JSON 里的 result 字段对应。
-RESULT_MESSAGES = {
-    "OK": "签到成功",
-    "ALREADY": "今日已签到",
-    "PARTIAL": "部分账号失败",
-    "AUTH_ERROR": "登录失败",
-    "NO_EXIT": "站点不可达（可能被 WAF 拦截）",
-    "NETWORK": "网络不可达",
-    "TIMEOUT": "已达本次运行时间预算",
-    "CONFIG_ERROR": "配置错误",
-    "ERROR": "脚本运行异常",
-}
 
 
 # ============================================================================
@@ -586,15 +566,15 @@ def process_account(
 # 汇总与输出
 # ============================================================================
 
-def judge(results: list[AccountResult], timed_out: bool) -> str:
+def judge(results: list[AccountResult]) -> str:
     """把账号级结果归并成一个结果码。"""
 
     if not results:
         return "ERROR"
     successful = [r for r in results if not r.error]
+    # 全部成功就是成功：哪怕预算刚好在最后一个账号之后耗尽，
+    # 也不该把一次成功的签到报成 TIMEOUT（那会让定时任务无谓地变红）。
     if len(successful) == len(results):
-        if timed_out:
-            return "TIMEOUT"
         return "OK" if any(r.checked_in for r in results) else "ALREADY"
     if successful:
         return "PARTIAL"
@@ -753,7 +733,7 @@ def run_checkin(config: Config, silent: bool) -> int:
     if timed_out:
         log.warning("时间预算已用尽，部分账号可能未处理")
 
-    result_code = judge(results, timed_out)
+    result_code = judge(results)
 
     payload = build_payload(config, results, result_code)
     emit(config, payload, silent)
@@ -822,7 +802,7 @@ def run_diagnose(config: Config, silent: bool) -> int:
 def usage() -> str:
     return (
         "用法：python signin.py [auto|silent|diagnose]\n"
-        "  auto      签到 + 查余额 + 通知，结果打到 stdout（默认）\n"
+        "  auto      签到 + 查余额，结果打到 stdout（默认）\n"
         "  silent    同上，但结果写入日志文件，配合系统定时任务使用\n"
         "  diagnose  只确认站点是否可达，不登录任何账号\n"
     )
@@ -840,15 +820,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"未知命令：{command}\n\n{usage()}", file=sys.stderr)
         return 2
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        stream=sys.stderr,
-    )
-    for handler in logging.getLogger().handlers:
-        handler.setFormatter(
-            BeijingLogFormatter("%(asctime)s [%(levelname)s] %(message)s")
+    # Windows 下用 pythonw.exe 静默运行时 sys.stderr 为 None，此时不能挂控制台
+    # 日志处理器，否则每条日志都会触发内部的 write 异常。直接关掉日志即可——
+    # 结果仍然会通过 emit() 写进日志文件，不会丢。
+    if sys.stderr is not None:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(message)s",
+            stream=sys.stderr,
         )
+        for handler in logging.getLogger().handlers:
+            handler.setFormatter(
+                BeijingLogFormatter("%(asctime)s [%(levelname)s] %(message)s")
+            )
+    else:
+        logging.disable(logging.CRITICAL)
 
     silent = command == "silent"
     config: Config | None = None
