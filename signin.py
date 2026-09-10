@@ -103,6 +103,7 @@ class BeijingLogFormatter(logging.Formatter):
 class Config:
     """运行期配置。所有字段都可以被环境变量覆盖。"""
 
+    # 站点有两个官方域名：ps.air-outer.com（新，默认） / agentrouter.org（旧）
     base_url: str = "https://ps.air-outer.com"
     accounts: list[dict[str, str]] = field(default_factory=list)
     request_timeout: int = 25

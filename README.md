@@ -110,7 +110,14 @@ python signin.py auto         # 正式签到
 
 ## 🌐 站点域名
 
-默认用 `https://ps.air-outer.com`，国内访问较稳定。想换回官方域名，改 `config.json` 的 `base_url` 即可：
+站点有两个官方域名，脚本默认用**新域名**，国内访问较稳定：
+
+| 域名 | 说明 |
+|---|---|
+| `https://ps.air-outer.com` | 新域名，**脚本默认使用** |
+| `https://agentrouter.org` | 旧域名，同样可用 |
+
+想改用旧域名，改 `config.json` 的 `base_url` 即可：
 
 ```json
 { "base_url": "https://agentrouter.org" }
@@ -198,7 +205,7 @@ python signin.py --help     # 看用法
 | 字段 | 环境变量 | 默认值 | 说明 |
 |---|---|---|---|
 | `accounts` | `AGENTROUTER_ACCOUNTS`<br>`AGENTROUTER_ACCOUNTS_JSON` | 无（必填） | 账号数组 |
-| `base_url` | `AGENTROUTER_BASE_URL` | `https://ps.air-outer.com` | 站点域名 |
+| `base_url` | `AGENTROUTER_BASE_URL` | `https://ps.air-outer.com` | 站点域名，两个官方域名二选一，详见「站点域名」 |
 | `request_timeout` | `AGENTROUTER_REQUEST_TIMEOUT` | `25` | 单次请求超时（秒），夹到 5–120 |
 | `budget_seconds` | `AGENTROUTER_BUDGET_SECONDS` | `300` | 单次运行总预算（秒），夹到 30–540 |
 | — | `AGENTROUTER_CONFIG` | 脚本同目录 `config.json` | 指定配置文件路径 |
@@ -271,7 +278,7 @@ export AGENTROUTER_ACCOUNTS_JSON='[{"username":"alice@qq.com","password":" pw 12
 |---|---|
 | `AUTH_ERROR` | 确认填的是**邮箱**，且已按「前置条件」绑定邮箱并重置过密码 |
 | `NO_EXIT` | 站点返回了 WAF 拦截页，当前出口 IP 被风控。换个网络环境再试；`diagnose` 可确认失败类型 |
-| `NETWORK` | 连不上站点：断网、DNS 异常、被本地防火墙拦截，或域名需要换成 `agentrouter.org` |
+| `NETWORK` | 连不上站点：断网、DNS 异常、被本地防火墙拦截。可试试换另一个官方域名（见「站点域名」） |
 | `TIMEOUT` | 网络严重超时，已成功的部分照常记录，剩余项下次再试 |
 | `CONFIG_ERROR` | 没建 `config.json`、没填账号、`base_url` 不是 https 等，报错信息里会写明是哪一项 |
 | `ERROR` | 其他异常，`report` 里有摘要，`error_type` 里是异常类型 |
