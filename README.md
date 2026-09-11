@@ -11,14 +11,33 @@
 
 </div>
 
-AgentRouter 的签到没有独立接口——**登录动作本身就会触发当日签到**。这个脚本每天帮你登录一次，顺带把余额查回来，结果落成一行 JSON 或写进日志。
+AgentRouter 每天签到能领 $25 额度，但得你自己记着去登录一次——忘一天，就少一天。
 
-- 在本机运行，配置留在你自己的 `config.json`，仓库不含任何凭据
-- 脚本不设代理项，跟随系统网络环境，不用额外配置
-- 一天只算一次积分，重复运行不会多领
-- 支持多账号，每个账号独立会话，一个失败不影响其他
-- 结果一行 JSON：`result` 给程序看，`report` 给人看
-- 支持 Win / macOS / Linux 定时任务，静默运行、错过后自动补签
+**这个脚本替你记。** 挂进系统定时任务后，它每天自动登录一次完成签到，顺手把余额查回来，
+结果写成一行 JSON。装完就可以忘掉它，想确认的时候看一眼日志就行。
+
+> **为什么是「登录」而不是「签到」**：AgentRouter 没有独立的签到接口，
+> **登录动作本身就会触发当日签到**。所以脚本要做的事，就是每天替你登录一次。
+
+**放心挂着跑**
+
+- 单个 Python 文件，只依赖 `requests`，读得完也改得动
+- 全程在你自己电脑上跑，账号只写在本机 `config.json`，仓库里没有任何凭据
+- 日志里账号只留前 4 位（`alic*****`），报错信息里的密码会被替换成 `***`
+
+**装一次就不用再管**
+
+- Win / macOS / Linux 都能挂定时任务，静默无窗口，不打扰你
+- **错过了会自动补签**：关机、睡眠、早上忘开电脑，三种情况都兜得住
+- 一天只算一次积分，多跑几次既不会重复领，也不会出错
+- 多账号各用独立会话，一个失败不影响其他
+- 瞬时故障（被风控拦、站点 5xx）自动重试一次，不为一次抽风白丢一天
+
+**出问题看得懂**
+
+- 结果是一行 JSON：`result` 给脚本判断，`report` 是一句给人看的话
+- 失败会明确区分**密码错**、**出口 IP 被风控**、**网络不通**——而不是笼统一句「签到失败」
+- 拿不准就跑 `python signin.py diagnose`，它只探测站点、不碰你的账号
 
 > 👤 作者：[88lin](https://github.com/88lin) · 📦 仓库：[github.com/88lin/agentrouter-auto-signin](https://github.com/88lin/agentrouter-auto-signin)
 
@@ -49,12 +68,6 @@ AgentRouter 的签到没有独立接口——**登录动作本身就会触发当
 </td>
 <td valign="middle"><b><a href="https://www.workbuddy.cn/events/invite?inviteCode=w0x2ic45z">WorkBuddy</a></b>&nbsp;是腾讯出品的全能 AI 工作台，是中国最受欢迎的效率 AI 智能体服务，说出要求、开始执行任务、交付完整成果。其中Hy4模型限时免费使用，注册即可获取2000积分，每月再赠送500积分，可用Kimi-K3、GLM-5.3等模型。</td>
 </tr>
-<tr>
-<td width="180" align="center" valign="middle">
-  <a href="https://api.justwoker.icu/register?aff=wpiO"><img src="https://cdn.jsdmirror.com/gh/88lin/picx-images-hosting@master/ScreenShot_2026-09-01_130420_632.webp" alt="JustDoWork" width="150"></a>
-</td>
-<td valign="middle"><b><a href="https://api.justwoker.icu/register?aff=wpiO">JustDoWork</a></b>&nbsp;是免费公益大模型API平台，可用Claude Opus 5 模型。注册送＄100（每日签到得＄30左右），支持GitHub登录。</td>
-</tr>
 </table>
 
 ---
@@ -78,7 +91,46 @@ AgentRouter 的签到没有独立接口——**登录动作本身就会触发当
 
 ---
 
-## 快速开始
+## 🚀 快速开始
+
+两条路，选一条走完就行。
+
+| | 适合谁 | 花多久 |
+|---|---|---|
+| **🤖 懒人一键** | 手边有 Claude Code / Cursor / Codex 之类的 AI 助手 | 发一段话，全程不用自己敲命令 |
+| **⌨️ 手动安装** | 想自己掌握每一步，或者手边没有 AI 助手 | 约 3 分钟 |
+
+### 🤖 懒人一键
+
+**先决定密码怎么给**：直接填进下面的提示词最省事，但它会留在对话记录里；介意的话就照
+提示词下面那条注记改一句话，让 AI 停下来等你自己填。
+
+然后把下面**整段**发给你的 AI 助手：
+
+```text
+帮我在本机装好这个 AgentRouter 每日自动签到脚本：
+https://github.com/88lin/agentrouter-auto-signin
+
+请按顺序做完，哪一步失败就停下来告诉我，不要跳过：
+
+1. clone 仓库，进入目录，执行 python -m pip install -r requirements.txt
+2. 复制 config.example.json 为 config.json，填入我的账号：
+   邮箱 = ___
+   密码 = ___
+3. 执行 python signin.py diagnose，确认站点可达
+4. 执行 python signin.py auto，确认输出里 "result" 是 "OK"、report 里报出了余额
+5. 按我的系统挂上每天 08:10 和 20:10 两个定时任务：
+   · Windows：执行 install-windows.ps1
+   · macOS：参照 agentrouter-auto-signin.plist.example 配 launchd
+   · Linux：按 README 的 Linux 段落写 crontab
+6. 最后把第 4 步的完整输出、以及定时任务的下次运行时间一起发给我
+```
+
+> [!TIP]
+> **不想把密码交给 AI**：把第 2 步整句换成「复制 config.example.json 为 config.json，
+> 然后停下来让我自己填账号」。填好后再让它接着做第 3 步。
+
+### ⌨️ 手动安装
 
 ```bash
 git clone https://github.com/88lin/agentrouter-auto-signin.git
@@ -98,30 +150,14 @@ cp config.example.json config.json      # Windows: Copy-Item config.example.json
 }
 ```
 
-然后跑一次：
+跑两条命令验证：
 
 ```bash
 python signin.py diagnose     # 先确认站点可达，看到 OK 就行
 python signin.py auto         # 正式签到
 ```
 
-看到 `"result": "OK"`、`report` 里报出余额，就通了。之后挂上定时任务即可。
-
-> [!TIP]
-> **懒人一键**：不想手动敲命令，把下面这段连同仓库链接发给你的 AI 助手即可，
-> 它会自己 clone、装依赖、建配置、注册定时任务、跑验证：
->
-> ```text
-> 帮我 clone 并设置好这个仓库：https://github.com/88lin/agentrouter-auto-signin
-> 1. 安装依赖：python -m pip install -r requirements.txt
-> 2. 把 config.example.json 复制成 config.json，账号密码填：邮箱=___，密码=___
->    （如果我不想把密码贴进对话，这一步我自己编辑 config.json，你跳过即可）
-> 3. Windows 运行 install-windows.ps1 注册每天 08:10 / 20:10 的定时任务；
->    macOS 按 agentrouter-auto-signin.plist.example 配好 launchd
-> 4. 依次运行 python signin.py diagnose 和 python signin.py auto，汇报结果
-> ```
->
-> 提醒：第 2 步的密码会出现在对话记录里，介意就自己填 config.json。
+看到 `"result": "OK"`、`report` 里报出余额，就通了。接着往下挂[定时任务](#-挂上定时任务)。
 
 ---
 
@@ -148,8 +184,8 @@ python signin.py auto         # 正式签到
 
 三个平台都把签到安排在 **08:10** 和 **20:10** 两个时间点。
 
-> 每日签到在**凌晨 00:00 重置到第二天**，一天只算一次，重复运行不加积分。
-> 所以 **08:10 那次签当天**，**20:10 是兜底**——专门应付早上电脑没开机的情况。
+> 签到按自然日计，一天只算一次，重复运行不加积分。站点没有公开确切的重置时点，
+> 所以 **08:10 那次签当天**，**20:10 是兜底**——顺带应付早上电脑没开机的情况。
 > 多跑一次成本几乎为零，但能避免整天漏签。
 
 ### 📌 错过后会不会自动补签
@@ -236,7 +272,7 @@ python signin.py --help     # 看用法
 
 ## ⚙️ 配置
 
-`config.json` 放在脚本同目录（可从 `config.example.json` 复制）。每一项都能被环境变量覆盖，环境变量优先级更高。
+`config.json` 放在脚本同目录（可从 `config.example.json` 复制）。表里的字段都能被对应的环境变量覆盖，环境变量优先级更高。
 
 | 字段 | 环境变量 | 默认值 | 说明 |
 |---|---|---|---|
@@ -244,8 +280,15 @@ python signin.py --help     # 看用法
 | `base_url` | `AGENTROUTER_BASE_URL` | `https://ps.air-outer.com` | 站点域名，两个官方域名二选一，详见「站点域名」 |
 | `request_timeout` | `AGENTROUTER_REQUEST_TIMEOUT` | `25` | 单次请求超时（秒），夹到 5–120 |
 | `budget_seconds` | `AGENTROUTER_BUDGET_SECONDS` | `300` | 单次运行总预算（秒），夹到 30–540 |
-| — | `AGENTROUTER_CONFIG` | 脚本同目录 `config.json` | 指定配置文件路径 |
-| — | `AGENTROUTER_LOG` | 脚本同目录 `checkin.log` | 指定日志文件路径 |
+
+下面两项**只认环境变量**，写进 `config.json` 不生效（它们要在读配置之前就定下来）：
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `AGENTROUTER_CONFIG` | 脚本同目录 `config.json` | 指定配置文件路径 |
+| `AGENTROUTER_LOG` | 脚本同目录 `checkin.log` | 指定日志文件路径，目录不存在会自动创建 |
+
+数值项写错不会让脚本崩：会回退成默认值，并在输出里附一条 `config_warning` 说明是哪一项。
 
 账号也能用环境变量给（两种写法，`AGENTROUTER_ACCOUNTS_JSON` 优先）：
 
@@ -281,11 +324,21 @@ export AGENTROUTER_ACCOUNTS_JSON='[{"username":"alice@qq.com","password":" pw 12
 | `OK` | 登录并签到成功，余额已查回 | 0 |
 | `PARTIAL` | 多账号里有一部分失败 | 1 |
 | `AUTH_ERROR` | 账号或密码不对 | 2 |
-| `NO_EXIT` | 站点返回了 WAF 拦截页 | 2 |
+| `NO_EXIT` | 被站点风控拦截，当前出口 IP 被拦 | 2 |
 | `NETWORK` | 连不上站点 | 2 |
 | `TIMEOUT` | 已达时间预算 | 2 |
 | `CONFIG_ERROR` | 配置有问题 | 2 |
 | `ERROR` | 其他异常 | 2 |
+
+`accounts` 里每一项的字段：
+
+| 字段 | 说明 |
+|---|---|
+| `account` | 脱敏后的账号，只留前 4 位 |
+| `balance_usd` | 该账号折算后的美元余额 |
+| `error` | 失败原因，非空即视为这个账号失败 |
+| `warning` | 签到成功但余额没查到时的提示，**不影响成败判定** |
+| `checked_in` | 站点返回的原始值，恒为 `true`，判断不出是否当天首次签到，仅作数据保留 |
 
 > 整个运行受「时间预算」约束（默认 300 秒）：网络严重超时时不会让请求逐个挂死把定时任务拖到被系统强杀，而是主动收尾并把已成功的部分如实记下来。
 
@@ -305,6 +358,8 @@ export AGENTROUTER_ACCOUNTS_JSON='[{"username":"alice@qq.com","password":" pw 12
 2. `quota_per_unit` 从接口读，不写死。站点哪天改比例，余额不会算错。
 3. 密码错误和账号被封禁返回**同一句话**（「用户名或密码错误，或用户已被封禁」），站点不区分。
 4. 登录响应里的 `quota` 恒为 `0`，不能用——真实余额只在 `/api/user/self` 里。同理 `checked_in` 恒为 `true`，判断不出是否当天首次签到，所以成功一律报 `OK`。
+5. **只有瞬时故障会重试**（被 WAF 拦、5xx、响应不是 JSON），最多重试一次、间隔 3 秒。密码错误这类业务失败不重试，不会拿你的账号去反复试密码。
+6. 多账号之间隔 2 秒再登录下一个，避免一串请求被风控当成异常流量。
 
 ---
 
@@ -313,16 +368,17 @@ export AGENTROUTER_ACCOUNTS_JSON='[{"username":"alice@qq.com","password":" pw 12
 | 现象 | 处理 |
 |---|---|
 | `AUTH_ERROR` | 确认填的是**邮箱**，且已按「前置条件」绑定邮箱并重置过密码 |
-| `NO_EXIT` | 站点返回了 WAF 拦截页，当前出口 IP 被风控。换个网络环境再试；`diagnose` 可确认失败类型 |
-| `NETWORK` | 连不上站点：断网、DNS 异常、被本地防火墙拦截。可试试换另一个官方域名（见「站点域名」） |
-| `TIMEOUT` | 网络严重超时，已成功的部分照常记录，剩余项下次再试 |
+| `NO_EXIT` | 当前出口 IP 被站点风控拦了（WAF 挑战页或 403），站点本身是通的。**换个网络环境**再试，别去查断网/DNS |
+| `NETWORK` | 真的连不上站点：断网、DNS 异常、被本地防火墙拦截。可试试换另一个官方域名（见「站点域名」） |
+| `TIMEOUT` | 网络严重超时，已成功的部分照常记录，剩余项等下次定时任务重试 |
 | `CONFIG_ERROR` | 没建 `config.json`、没填账号、`base_url` 不是 https 等，报错信息里会写明是哪一项 |
 | `ERROR` | 其他异常，`report` 里有摘要，`error_type` 里是异常类型 |
+| 输出里有 `config_warning` | 配置项写错被回退成默认值了（比如 `request_timeout` 填了非数字），照着提示改 `config.json` |
 | 提示缺少 `requests` | 先在仓库目录跑 `python -m pip install -r requirements.txt` |
 | 任务没跑 | Win：`Get-ScheduledTaskInfo -TaskName "AgentRouterAutoSignin"` 看 `LastTaskResult`；macOS：先看 `/tmp/agentrouter-auto-signin.err` |
 | `checkin.log` 是空的 | 只有 `silent` 模式才写日志，手动跑 `auto` 的结果只打到屏幕 |
 
-**拿不准就先跑 `python signin.py diagnose`**，它会直接告诉你站点是否可达、是不是被 WAF 拦。
+**拿不准就先跑 `python signin.py diagnose`**：它只探测站点、不碰你的账号，会直接告诉你是可达、被 WAF 拦（`NO_EXIT`），还是网络不通（`NETWORK`）。
 
 ---
 
@@ -330,7 +386,9 @@ export AGENTROUTER_ACCOUNTS_JSON='[{"username":"alice@qq.com","password":" pw 12
 
 - 仓库不含、不内嵌、不传输任何第三方密钥；账号密码只在你本机的 `config.json` 里
 - `config.json` 已在 `.gitignore` 中——**别把它提交到任何仓库**，也别贴到聊天记录里
-- 日志里账号只保留前 4 位（`alic*****`）；异常信息中的密码会被替换为 `***`
+- 日志里账号只保留前 4 位（`alic*****`），这是数据结构层面的硬约束，不靠调用方自觉
+- 异常信息里出现的密码会被替换为 `***`
+- 只重试瞬时故障；密码错误不会被重试，不存在拿你的账号反复试密码
 - 脚本只作用于**你自己的**账号
 
 ## ⚠️ 免责声明

@@ -42,8 +42,8 @@
     <key>WorkingDirectory</key>
     <string>/PATH/TO/agentrouter-auto-signin</string>
 
-    <!-- 每天 08:10 与 20:10 各跑一次。站点没有公开每日重置时点，
-         第二个时间点同时兜住「早上没开机」的情况。脚本幂等，重复运行无副作用。 -->
+    <!-- 每天 08:10 与 20:10 各跑一次。签到按自然日计一次，但站点没有公开
+         确切的重置时点，第二个时间点同时兜住「早上没开机」。脚本幂等，重复运行无副作用。 -->
     <key>StartCalendarInterval</key>
     <array>
         <dict>

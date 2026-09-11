@@ -25,13 +25,14 @@
 
 退出码：
 
-    0  全部账号成功（含"今日已签到"）
+    0  全部账号成功
     1  部分账号失败
     2  全部账号失败、配置错误，或站点不可达
 
 关于网络：脚本没有任何代理配置项，它会跟随系统的网络环境，不需要也不能在
 这里配代理。想换站点域名改 ``base_url`` 即可（环境变量 ``AGENTROUTER_BASE_URL``
-优先级更高）。
+优先级更高）。被 WAF 拦截、5xx、响应不是 JSON 这类瞬时失败会自动重试一次；
+密码错误之类的业务失败不重试。
 """
 
 from __future__ import annotations
@@ -74,6 +75,18 @@ FALLBACK_QUOTA_PER_UNIT = 500000
 # 把系统计划任务拖到被强杀，导致当天记录整条丢失。
 DEFAULT_BUDGET_SECONDS = 300
 MAX_BUDGET_SECONDS = 540
+
+# 可重试失败（WAF 拦截、5xx、响应不是 JSON）的尝试次数与退避间隔。
+# 只重试一次：站点前面挂着风控，连着猛敲反而更容易被拦，而且每天还有
+# 第二个定时任务兜底，这里没必要死磕。
+MAX_ATTEMPTS = 2
+RETRY_BACKOFF_SECONDS = 3
+
+# 多账号之间的间隔（秒）。一串登录请求连着打过去容易被风控当成异常流量。
+ACCOUNT_INTERVAL_SECONDS = 2
+
+# 脱敏后缀。mask_account 靠它认出「已经遮过」的值，从而可以重复调用。
+MASK_SUFFIX = "*****"
 
 log = logging.getLogger("agentrouter")
 
@@ -149,6 +162,36 @@ def _clamp(value: int, low: int, high: int, label: str, warnings: list[str]) -> 
     return value
 
 
+def _config_int(
+    raw: dict[str, Any], key: str, default: int, warnings: list[str]
+) -> int:
+    """读取配置文件里的整数项，非法值回退默认值并记录警告。
+
+    不能直接 ``int(raw[key])``：配置里手滑写成 ``"abc"`` 或写成数组时，
+    裸 int() 会抛到最外层的兜底 except，把一句可修的配置问题伪装成
+    「脚本运行异常」，还附一行生英文报错。
+    """
+
+    value = raw.get(key)
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        warnings.append(f"{key} 不是合法整数（{value!r}），已改用默认值 {default}")
+        return default
+
+
+def resolve_log_path() -> Path:
+    """日志文件路径：环境变量优先，否则脚本同目录的 ``checkin.log``。
+
+    单独拎出来是因为它必须在任何校验之前定下：配置报错也得落进用户真正
+    在 tail 的那个文件，而不是悄悄写回默认路径。
+    """
+
+    return Path(_env("AGENTROUTER_LOG") or DEFAULT_LOG_PATH)
+
+
 def _parse_accounts_from_text(raw_text: str) -> list[dict[str, str]]:
     """解析 ``用户名:密码`` 多行文本。
 
@@ -222,6 +265,9 @@ def load_config(config_path: Path | None = None) -> Config:
 
     config = Config(config_path=path, warnings=warnings)
 
+    # 日志路径要最先定下：下面任何一条校验抛 ConfigError，都得写进这个文件。
+    config.log_path = resolve_log_path()
+
     # ---- 站点地址 ----
     config.base_url = (
         _env("AGENTROUTER_BASE_URL")
@@ -258,12 +304,12 @@ def load_config(config_path: Path | None = None) -> Config:
     # ---- 超时与预算 ----
     config.request_timeout = _env_int(
         "AGENTROUTER_REQUEST_TIMEOUT",
-        int(raw.get("request_timeout") or Config.request_timeout),
+        _config_int(raw, "request_timeout", Config.request_timeout, warnings),
         warnings,
     )
     config.budget_seconds = _env_int(
         "AGENTROUTER_BUDGET_SECONDS",
-        int(raw.get("budget_seconds") or Config.budget_seconds),
+        _config_int(raw, "budget_seconds", Config.budget_seconds, warnings),
         warnings,
     )
 
@@ -273,8 +319,6 @@ def load_config(config_path: Path | None = None) -> Config:
     config.budget_seconds = _clamp(
         config.budget_seconds, 30, MAX_BUDGET_SECONDS, "budget_seconds", warnings
     )
-
-    config.log_path = Path(_env("AGENTROUTER_LOG") or DEFAULT_LOG_PATH)
 
     if not config.base_url.startswith("https://"):
         raise ConfigError(f"base_url 必须使用 https://（当前为 {config.base_url!r}）")
@@ -307,15 +351,27 @@ class Deadline:
     def expired(self) -> bool:
         return time.monotonic() >= self._end
 
+    def seconds_left(self) -> float:
+        """剩余预算（秒），已耗尽时为负数。"""
+
+        return self._end - time.monotonic()
+
     def remaining(self, cap: int) -> int:
-        return max(1, min(cap, int(self._end - time.monotonic())))
+        return max(1, min(cap, int(self.seconds_left())))
 
 
 def mask_account(username: str) -> str:
-    """脱敏账号，只保留前四个字符：user@example.com -> user*****"""
+    """脱敏账号，只保留前四个字符：user@example.com -> user*****
+
+    已经脱敏过的值原样返回，所以重复调用是安全的。
+    短名字不整段露出：``ab`` 只留一半，遮完是 ``a*****``。
+    """
 
     username = str(username or "")
-    return f"{username[:4]}*****" if len(username) > 4 else f"{username}*****"
+    if username.endswith(MASK_SUFFIX):
+        return username
+    keep = 4 if len(username) > 4 else len(username) // 2
+    return f"{username[:keep]}{MASK_SUFFIX}"
 
 
 def safe_error(error: object) -> str:
@@ -441,6 +497,50 @@ def parse_json_response(response: Response, endpoint: str) -> dict[str, Any]:
     return payload
 
 
+def request_json(
+    session: Session,
+    method: str,
+    url: str,
+    endpoint: str,
+    config: Config,
+    deadline: Deadline,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """发一次请求并解析 JSON，可重试的失败会再试一次。
+
+    只重试 :func:`parse_json_response` 标成 ``retryable`` 的失败——WAF 拦截、
+    5xx、响应不是 JSON 这类瞬时问题。密码错误之类的业务失败走不到这里
+    （那是 HTTP 200 + ``success=false``），不会被重复提交。
+
+    requests 自己抛的连接异常不重试：重试一次超时等于把时间预算再赔一份，
+    而每天两次定时任务本身就是兜底。
+    """
+
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            response = session.request(
+                method,
+                url,
+                timeout=deadline.remaining(config.request_timeout),
+                **kwargs,
+            )
+            return parse_json_response(response, endpoint)
+        except UpstreamError as exc:
+            # 退避还没睡完预算就见底，重试也来不及，不如如实收尾。
+            no_time_left = deadline.seconds_left() <= RETRY_BACKOFF_SECONDS + 1
+            if attempt >= MAX_ATTEMPTS or not exc.retryable or no_time_left:
+                raise
+            log.warning(
+                "%s 失败（%s），%d 秒后重试",
+                endpoint,
+                safe_error(exc),
+                RETRY_BACKOFF_SECONDS,
+            )
+            time.sleep(RETRY_BACKOFF_SECONDS)
+
+
 def fetch_site_info(config: Config, deadline: Deadline) -> dict[str, Any]:
     """调用 ``/api/status`` 确认站点可达，并取回站点信息。
 
@@ -451,11 +551,14 @@ def fetch_site_info(config: Config, deadline: Deadline) -> dict[str, Any]:
 
     session = create_session(config)
     try:
-        response = session.get(
+        payload = request_json(
+            session,
+            "GET",
             f"{config.base_url}/api/status",
-            timeout=deadline.remaining(config.request_timeout),
+            "/api/status",
+            config,
+            deadline,
         )
-        payload = parse_json_response(response, "/api/status")
         if payload.get("success") is not True:
             raise UpstreamError("/api/status 返回 success != true", retryable=True)
         data = payload.get("data")
@@ -484,12 +587,15 @@ def login_and_checkin(
 
     username = account["username"]
     try:
-        response = session.post(
+        payload = request_json(
+            session,
+            "POST",
             f"{config.base_url}/api/user/login",
+            "/api/user/login",
+            config,
+            deadline,
             json={"username": username, "password": account["password"]},
-            timeout=deadline.remaining(config.request_timeout),
         )
-        payload = parse_json_response(response, "/api/user/login")
     except (requests.RequestException, UpstreamError) as exc:
         return {}, safe_error(exc)
 
@@ -526,12 +632,15 @@ def get_balance(
         headers["Authorization"] = str(access_token)
 
     try:
-        response = session.get(
+        payload = request_json(
+            session,
+            "GET",
             f"{config.base_url}/api/user/self",
+            "/api/user/self",
+            config,
+            deadline,
             headers=headers,
-            timeout=deadline.remaining(config.request_timeout),
         )
-        payload = parse_json_response(response, "/api/user/self")
     except (requests.RequestException, UpstreamError) as exc:
         return 0.0, f"余额查询失败：{safe_error(exc)}"
 
@@ -552,7 +661,8 @@ def process_account(
     """处理单个账号：建独立 Session → 登录签到 → 查余额。"""
 
     username = account["username"]
-    result = AccountResult(account=mask_account(username))
+    # 不用在这里 mask：AccountResult 构造时一定会遮，那是硬约束。
+    result = AccountResult(account=username)
     if deadline.expired():
         result.error = "已达时间预算，未执行"
         return result
@@ -596,6 +706,11 @@ def judge(results: list[AccountResult]) -> str:
     auth_markers = ("用户名或密码错误", "密码错误", "用户已被封禁")
     if all(any(marker in r.error for marker in auth_markers) for r in results):
         return "AUTH_ERROR"
+    # WAF 必须排在网络之前判：被风控拦下时站点本身是通的，报成 NETWORK
+    # 会把人引去查断网 / DNS / 防火墙，方向完全反了——该做的是换网络出口。
+    waf_markers = ("WAF", "HTTP 403")
+    if all(any(marker in r.error for marker in waf_markers) for r in results):
+        return "NO_EXIT"
     network_markers = (
         "Failed to establish",
         "Max retries",
@@ -605,6 +720,7 @@ def judge(results: list[AccountResult]) -> str:
         "SSLError",
         "返回的不是 JSON",
         "HTTP 5",
+        # WAF / 403 保留在这里：混着超时之类的失败时，NETWORK 是个合适的统称。
         "HTTP 403",
         "HTTP 429",
         "WAF",
@@ -636,14 +752,14 @@ def build_report(results: list[AccountResult], result_code: str) -> str:
         first = results[0]
         return f"登录失败：{first.error[:160]}"
     if result_code == "NO_EXIT":
-        return "站点返回 WAF 拦截页，签到未执行（当前出口 IP 被风控）"
+        # 覆盖两种情形：明确的 WAF 挑战页，和光秃秃的 403。后者站点不说原因，
+        # 但对用户来说动作一样——换个网络出口，而不是去查断网。
+        return "被站点风控拦截，签到未执行：当前出口 IP 被拦，换个网络环境再试"
     if result_code == "NETWORK":
         return "网络不可达：无法连接站点，签到未执行"
     if result_code == "TIMEOUT":
-        return (
-            f"已达本次运行时间预算，已成功 {len(successful)} 个账号，"
-            "剩余项下次再试"
-        )
+        # 只要有账号成功，judge() 就归成 PARTIAL，所以走到这里必然是 0 个成功。
+        return "已达本次运行时间预算，没有账号完成签到，等下次定时任务重试"
     if result_code == "CONFIG_ERROR":
         return "配置错误，请检查 config.json 或环境变量"
     first = results[0] if results else None
@@ -666,8 +782,10 @@ def build_payload(
     if results:
         successful = [r for r in results if not r.error]
         payload["accounts"] = [asdict(r) for r in results]
+        # 套一层 float：全失败时 sum([]) 是 int 0，会让这个字段在 JSON 里
+        # 时而整数时而小数，下游解析平白多一种情况要处理。
         payload["total_balance_usd"] = round(
-            sum(r.balance_usd for r in successful), 2
+            float(sum(r.balance_usd for r in successful)), 2
         )
     if config.warnings:
         payload["config_warning"] = config.warnings
@@ -682,6 +800,8 @@ def emit(config: Config, payload: dict[str, Any], silent: bool) -> None:
         print(line, flush=True)
         return
     try:
+        # 自定义日志路径指向还不存在的目录时，先建出来，别让整条记录白丢。
+        config.log_path.parent.mkdir(parents=True, exist_ok=True)
         with config.log_path.open("a", encoding="utf-8") as handle:
             handle.write(f"[{payload.get('time', bjt_now())}] {line}\n")
     except OSError as exc:
@@ -715,7 +835,7 @@ def run_checkin(config: Config, silent: bool) -> int:
             reason = f"网络不可达，无法连接站点：{detail[:120]}"
 
         results = [
-            AccountResult(account=mask_account(account["username"]), error=reason)
+            AccountResult(account=account["username"], error=reason)
             for account in config.accounts
         ]
         emit(config, build_payload(config, results, result_code), silent)
@@ -732,7 +852,10 @@ def run_checkin(config: Config, silent: bool) -> int:
     log.info("站点可达，开始签到，共 %d 个账号", len(config.accounts))
 
     results: list[AccountResult] = []
-    for account in config.accounts:
+    for index, account in enumerate(config.accounts):
+        # 账号之间隔一下：一串登录请求连着打过去，容易被站点风控当成异常流量。
+        if index and not deadline.expired():
+            time.sleep(ACCOUNT_INTERVAL_SECONDS)
         results.append(
             process_account(config, account, quota_per_unit, deadline)
         )
@@ -766,12 +889,14 @@ def run_diagnose(config: Config, silent: bool) -> int:
 
     ok = False
     detail = ""
+    failure_kind = ""
     data: dict[str, Any] = {}
     try:
         data = fetch_site_info(config, deadline)
         ok = True
     except (requests.RequestException, UpstreamError) as exc:
         detail = safe_error(exc)
+        failure_kind = classify_connection_error(detail)
 
     if ok:
         print(f"OK   站点可达（{config.base_url}）")
@@ -782,12 +907,21 @@ def run_diagnose(config: Config, silent: bool) -> int:
     else:
         print(f"FAIL 无法访问 {config.base_url}")
         print(f"     {detail}")
-        if classify_connection_error(detail) == "waf":
+        if failure_kind == "waf":
             print("     这是站点风控拦截（WAF），不是断网：换个网络环境再试。")
+
+    # result 要跟 failure_kind 一致：以前这里恒为 NO_EXIT，网络不通也报成
+    # 「被 WAF 拦」，同一行 JSON 里两个字段互相打脸。
+    if ok:
+        result_code = "OK"
+    elif failure_kind == "waf":
+        result_code = "NO_EXIT"
+    else:
+        result_code = "NETWORK"
 
     payload = {
         "time": bjt_now(),
-        "result": "OK" if ok else "NO_EXIT",
+        "result": result_code,
         "report": (
             f"站点可达（{data.get('system_name') or config.base_url}）"
             if ok
@@ -796,7 +930,7 @@ def run_diagnose(config: Config, silent: bool) -> int:
         "reachable": ok,
     }
     if not ok:
-        payload["failure_kind"] = classify_connection_error(detail)
+        payload["failure_kind"] = failure_kind
     if config.warnings:
         payload["config_warning"] = config.warnings
     emit(config, payload, silent)
@@ -863,7 +997,9 @@ def main(argv: list[str] | None = None) -> int:
         return run_checkin(config, silent)
     except ConfigError as exc:
         log.error("配置错误：%s", exc)
-        fallback = config or Config()
+        # load_config 可能在定下 log_path 之前就抛了，这里自己再解析一次：
+        # 配置报错必须写进用户真正在看的那个日志文件。
+        fallback = config or Config(log_path=resolve_log_path())
         payload = {
             "time": bjt_now(),
             "result": "CONFIG_ERROR",
@@ -875,7 +1011,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # 兜底：异常绝不静默丢失
         detail = safe_error(exc)
         log.error("脚本运行异常：%s", detail)
-        fallback = config or Config()
+        fallback = config or Config(log_path=resolve_log_path())
         payload = {
             "time": bjt_now(),
             "result": "ERROR",
