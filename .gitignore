@@ -1,8 +1,8 @@
-# ⚠️ 你的账号密码就写在这里，绝对不要提交到任何仓库
 config.json
 
-# 运行日志
+# 运行日志与状态
 checkin.log
+checkin.state
 *.log
 
 # Python

@@ -42,26 +42,17 @@
     <key>WorkingDirectory</key>
     <string>/PATH/TO/agentrouter-auto-signin</string>
 
-    <!-- 每天 08:10 与 20:10 各跑一次。签到按自然日计一次，但站点没有公开
-         确切的重置时点，第二个时间点同时兜住「早上没开机」。脚本幂等，重复运行无副作用。 -->
-    <key>StartCalendarInterval</key>
-    <array>
-        <dict>
-            <key>Hour</key>
-            <integer>8</integer>
-            <key>Minute</key>
-            <integer>10</integer>
-        </dict>
-        <dict>
-            <key>Hour</key>
-            <integer>20</integer>
-            <key>Minute</key>
-            <integer>10</integer>
-        </dict>
-    </array>
+    <!-- 每 30 分钟跑一次（1800 秒）。看着很勤，其实不然：
+         脚本会把「今天已经签成了」记进 checkin.state，当天后续的运行读到它
+         就直接退出、连站点都不碰——成功那天站点只被登录 1 次。只有还没签成
+         时才真的去登录，等于失败每 30 分钟自动重试一次。
 
-    <!-- 登录时也跑一次：如果 08:10 / 20:10 那两个时间点机器正好关机，
-         这一次就是补签的机会。脚本幂等，多跑不会重复计分。 -->
+         签到按北京时间自然日计算、每天 00:00 重置，脚本也按北京时间判断当天。 -->
+    <key>StartInterval</key>
+    <integer>1800</integer>
+
+    <!-- 登录时也跑一次：开机/登录后立刻补上，不用等下一个 30 分钟。
+         脚本幂等，当天已签过的话它会直接退出。 -->
     <key>RunAtLoad</key>
     <true/>
 

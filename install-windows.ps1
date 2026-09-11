@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
     AgentRouter 自动签到 · Windows 一键安装
     ------------------------------------------------------------------
@@ -6,19 +6,35 @@
 
         powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
 
-    它会自动建好两个计划任务（都用 pythonw.exe 静默运行，不弹窗口）：
+    想自己指定起点时间 / 间隔就加参数：
 
-        AgentRouterAutoSignin   每天 08:10   签到 + 查余额
-        AgentRouterRetrySignin  每天 20:10   兜底重试
+        powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 -StartTime 00:17 -IntervalMinutes 30
 
-    为什么要有第二个任务：签到按自然日计一次，但站点没有公开确切的重置时点，
-    而且电脑早上可能根本没开机。脚本幂等，重复运行不会重复计分、也不会报错，
-    所以多跑一次的成本几乎为零，却能兜住「重置时点不确定」和「错过开机」。
+    它会建好一个计划任务（用 pythonw.exe 静默运行，不弹窗口）：
+
+        AgentRouterAutoSignin   每 30 分钟跑一次
+
+    为什么是「每 30 分钟」而不是「每天一两次」：
+    脚本会把「今天已经签成了」记进 checkin.state，当天后续的运行读到它就直接
+    退出，连站点都不碰——所以成功那天站点只被登录 1 次。只有还没签成时才会
+    真的去登录，等于失败每 30 分钟自动重试一次。
+
+    之所以要这么绕，是因为 Windows 计划任务**不会按退出码重试**：
+    RestartCount 只管「任务启动不起来」，任务跑完了返回失败它是不管的
+    （实测：动作退出码 2，配 RestartCount=2/间隔 1 分钟，等 2.5 分钟一次都没重跑）。
+
+    不指定起点时间时，脚本会随机挑一分钟。如果所有人都用同一个写死的时间，
+    就会在那一刻集体涌向站点；各装各的时间天然错峰。
 
     卸载：
         Unregister-ScheduledTask -TaskName "AgentRouterAutoSignin" -Confirm:$false
-        Unregister-ScheduledTask -TaskName "AgentRouterRetrySignin" -Confirm:$false
 #>
+
+param(
+    # 默认随机挑一分钟，让不同用户的任务天然错开，别都挤在整点。
+    [string]$StartTime = ("00:{0:D2}" -f (Get-Random -Minimum 0 -Maximum 60)),
+    [int]$IntervalMinutes = 30
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -30,7 +46,8 @@ $ManualPythonw = ""   # 例如 C:\Python313\pythonw.exe
 $ManualScript  = ""   # 例如 C:\Users\You\tools\agentrouter-auto-signin\signin.py
 
 $TaskDaily = "AgentRouterAutoSignin"
-$TaskRetry = "AgentRouterRetrySignin"
+# 旧版本装过的第二个任务；下面会顺手清掉，避免升级后两个任务并存。
+$TaskLegacyRetry = "AgentRouterRetrySignin"
 
 function Resolve-Pythonw {
     if ($ManualPythonw) {
@@ -143,27 +160,48 @@ $settings = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
 
 # StartWhenAvailable：关机错过的任务会在下次开机后补跑。
-$triggerDaily = New-ScheduledTaskTrigger -Daily -At "08:10"
-$triggerRetry = New-ScheduledTaskTrigger -Daily -At "20:10"
+if ($StartTime -notmatch '^([01]\d|2[0-3]):[0-5]\d$') {
+    throw "时间格式不对：'$StartTime'。请用 24 小时制 HH:mm，例如 00:17。"
+}
+if ($IntervalMinutes -lt 5 -or $IntervalMinutes -gt 720) {
+    throw "-IntervalMinutes 应在 5~720 之间（当前 $IntervalMinutes）。"
+}
 
-Register-ScheduledTask -TaskName $TaskDaily -Action $action -Trigger $triggerDaily -Settings $settings -Force | Out-Null
-Register-ScheduledTask -TaskName $TaskRetry -Action $action -Trigger $triggerRetry -Settings $settings -Force | Out-Null
+# 每日触发 + 重复间隔：New-ScheduledTaskTrigger 不能一次同时给出这两者，
+# 所以先单独造一个带 Repetition 的「一次性」触发器，再把它的 Repetition
+# 嫁接到每日触发器上。这是 PowerShell 5.1 下可用的写法。
+$trigger = New-ScheduledTaskTrigger -Daily -At $StartTime
+$repeat  = New-ScheduledTaskTrigger -Once -At $StartTime `
+    -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes) `
+    -RepetitionDuration (New-TimeSpan -Hours 23 -Minutes 55)
+$trigger.Repetition = $repeat.Repetition
+
+Register-ScheduledTask -TaskName $TaskDaily -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
+
+# 旧版本装的是「早晚各一次」两个任务，升级后把多余那个清掉。
+if (Get-ScheduledTask -TaskName $TaskLegacyRetry -ErrorAction SilentlyContinue) {
+    Unregister-ScheduledTask -TaskName $TaskLegacyRetry -Confirm:$false
+    Write-Host "      已清理旧版本的 $TaskLegacyRetry 任务" -ForegroundColor DarkGray
+}
 
 Write-Host "[4/4] 计划任务已注册" -ForegroundColor Green
 Write-Host ""
 Write-Host "任务清单" -ForegroundColor Cyan
 Write-Host "----------------------------------------------------------------" -ForegroundColor DarkGray
 
-foreach ($name in @($TaskDaily, $TaskRetry)) {
-    $task = Get-ScheduledTask -TaskName $name
-    $info = Get-ScheduledTaskInfo -TaskName $name
-    $next = if ($info.NextRunTime) { $info.NextRunTime } else { "-" }
-    Write-Host ("  {0,-24} {1,-10} 下次运行：{2}" -f $task.TaskName, $task.State, $next)
-}
+$task = Get-ScheduledTask -TaskName $TaskDaily
+$info = Get-ScheduledTaskInfo -TaskName $TaskDaily
+$next = if ($info.NextRunTime) { $info.NextRunTime } else { "-" }
+Write-Host ("  {0,-24} {1,-10} 下次运行：{2}" -f $task.TaskName, $task.State, $next)
 
 Write-Host ""
-Write-Host "两个任务都开启了「错过后尽快补跑」：如果 08:10 / 20:10 机器正好关机，" -ForegroundColor Cyan
-Write-Host "下次开机（并登录）后会自动补跑一次，不会整天漏签。" -ForegroundColor Cyan
+Write-Host ("每 {0} 分钟跑一次（起点 {1}）。签成功那天，当天后续的运行会读到状态文件" -f $IntervalMinutes, $StartTime) -ForegroundColor Cyan
+Write-Host "直接退出、连站点都不碰；只有还没签成时才真的去登录——等于失败自动重试。" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "任务还开了「错过后尽快补跑」：关机错过的话，下次开机登录后会自动补上。" -ForegroundColor Cyan
+Write-Host ""
+Write-Host ("想换起点时间或间隔，加参数重跑即可：") -ForegroundColor Cyan
+Write-Host "  .\install-windows.ps1 -StartTime 00:17 -IntervalMinutes 30" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "查看日志" -ForegroundColor Cyan
 Write-Host "  Get-Content checkin.log -Tail 5    # 每行一条 JSON" -ForegroundColor DarkGray
@@ -175,5 +213,4 @@ Write-Host "  python signin.py diagnose" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "卸载" -ForegroundColor Cyan
 Write-Host "  Unregister-ScheduledTask -TaskName `"$TaskDaily`" -Confirm:`$false" -ForegroundColor DarkGray
-Write-Host "  Unregister-ScheduledTask -TaskName `"$TaskRetry`" -Confirm:`$false" -ForegroundColor DarkGray
 Write-Host ""

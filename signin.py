@@ -19,15 +19,21 @@
 用法：
 
     python signin.py             # 等同 auto
-    python signin.py auto        # 签到 + 查余额，结果打到 stdout
-    python signin.py silent      # 同上，但结果写入日志文件（配合系统定时任务）
+    python signin.py auto        # 立刻签到 + 查余额，结果打到 stdout（手动用）
+    python signin.py silent      # 给定时任务用：当天已签成过就直接跳过，
+                                 # 否则签到并把结果写进日志文件
     python signin.py diagnose    # 只探测站点是否可达，不登录任何账号
 
 退出码：
 
-    0  全部账号成功
+    0  全部账号成功（含 silent 判定「今天已签过、跳过」）
     1  部分账号失败
     2  全部账号失败、配置错误，或站点不可达
+
+关于定时任务：``silent`` 会把「今天已经签成了」记进 ``checkin.state``，所以
+可以放心地每隔 30 分钟跑一次——成功那天只有第一次真正联网，后面全是空转；
+失败才会在下一次运行重试。这是因为系统本身不提供按退出码重试的能力
+（Windows 计划任务的 RestartCount 只管「任务起不来」，不管「跑完了返回失败」）。
 
 关于网络：脚本没有任何代理配置项，它会跟随系统的网络环境，不需要也不能在
 这里配代理。想换站点域名改 ``base_url`` 即可（环境变量 ``AGENTROUTER_BASE_URL``
@@ -63,6 +69,7 @@ except ImportError:  # pragma: no cover - 只在依赖缺失时触发
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = SCRIPT_DIR / "config.json"
 DEFAULT_LOG_PATH = SCRIPT_DIR / "checkin.log"
+DEFAULT_STATE_PATH = SCRIPT_DIR / "checkin.state"
 
 # 日志与输出统一使用北京时间（UTC+8）。
 BEIJING_TZ = timezone(timedelta(hours=8))
@@ -84,6 +91,21 @@ RETRY_BACKOFF_SECONDS = 3
 
 # 多账号之间的间隔（秒）。一串登录请求连着打过去容易被风控当成异常流量。
 ACCOUNT_INTERVAL_SECONDS = 2
+
+# 单次运行允许的最大账号数。
+#
+# 这是一条刻意写死、不给配置项的硬上限。站点的使用规范把「通过脚本或多重账号
+# 批量获取额度」列为重点关注行为，拿几十上百个号来跑签到正是它要拦的事。
+# 个人自用（比如个人号 + 工作号）远够用；做成可配置就等于没有上限。
+MAX_ACCOUNTS = 10
+
+# silent 模式下，哪些结果码算「今天到此为止、不必再重试」：
+#   OK          —— 签到成功，当天已完成
+#   AUTH_ERROR  —— 密码错 / 账号被封，重试也没用，还会拿错密码反复登录被站点判定异常
+# 其余（NETWORK / NO_EXIT / TIMEOUT / PARTIAL / ERROR）都是可能自愈的临时故障，
+# 不写状态，留给下一次定时运行重试。CONFIG_ERROR 发生在联网之前、不碰站点，
+# 故意不算「到此为止」——让它每次都如实报错，好让你一眼看到配置坏了。
+TERMINAL_RESULTS = ("OK", "AUTH_ERROR")
 
 # 脱敏后缀。mask_account 靠它认出「已经遮过」的值，从而可以重复调用。
 MASK_SUFFIX = "*****"
@@ -190,6 +212,37 @@ def resolve_log_path() -> Path:
     """
 
     return Path(_env("AGENTROUTER_LOG") or DEFAULT_LOG_PATH)
+
+
+def resolve_state_path() -> Path:
+    """状态文件路径：环境变量优先，否则脚本同目录的 ``checkin.state``。"""
+
+    return Path(_env("AGENTROUTER_STATE") or DEFAULT_STATE_PATH)
+
+
+def read_done_date(path: Path) -> str:
+    """读出状态文件里「当天已了结」的日期，读不到就返回空串。
+
+    任何异常都当成「没记录」：状态文件只是省一次请求的优化，它坏了最多
+    让今天多签一次（幂等，没有副作用），绝不能因此让签到跑不起来。
+    """
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    return str(data.get("date", "")) if isinstance(data, dict) else ""
+
+
+def mark_done(path: Path, date: str, result: str) -> None:
+    """记下「今天不用再跑了」。写失败只告警，不影响已经完成的签到。"""
+
+    payload = {"date": date, "result": result, "time": bjt_now()}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        log.warning("写入状态文件失败：%s", exc)
 
 
 def _parse_accounts_from_text(raw_text: str) -> list[dict[str, str]]:
@@ -327,6 +380,11 @@ def load_config(config_path: Path | None = None) -> Config:
             "未配置任何账号：请在 config.json 的 accounts 里填写，"
             "或设置 AGENTROUTER_ACCOUNTS / AGENTROUTER_ACCOUNTS_JSON"
         )
+    if len(config.accounts) > MAX_ACCOUNTS:
+        raise ConfigError(
+            f"账号数超过上限：配了 {len(config.accounts)} 个，最多 {MAX_ACCOUNTS} 个。"
+            "本工具面向个人自用，站点的使用规范不允许拿多账号批量刷额度"
+        )
     for index, account in enumerate(config.accounts, start=1):
         if not account.get("username") or not account.get("password"):
             raise ConfigError(f"第 {index} 个账号缺少 username 或 password")
@@ -402,6 +460,16 @@ def bjt_now() -> str:
     """北京时间字符串，用于日志和输出。"""
 
     return datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def bjt_date() -> str:
+    """北京时间的日期。
+
+    站点的签到按北京时间自然日计、每天 00:00 重置，所以「今天签过没」
+    必须按北京时间判断，不能用本机时区——否则跨时区使用会判错一整天。
+    """
+
+    return datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
 
 
 def quota_to_usd(quota: Any, quota_per_unit: int) -> float:
@@ -571,9 +639,14 @@ def classify_connection_error(detail: str) -> str:
     """判断连接失败属于风控拦截（``"waf"``）还是网络不通（``"network"``）。
 
     两者对用户的排查动作完全不同：前者要换网络环境，后者要查断网 / DNS。
+
+    403 也算风控：站点不说原因，但对用户来说动作和被 WAF 拦一样。这里的
+    判定必须和 :func:`judge` 的 ``waf_markers`` 保持一致，否则 diagnose 和
+    auto 会对同一个错误给出两种结论。
     """
 
-    return "waf" if "waf" in detail.lower() else "network"
+    lowered = detail.lower()
+    return "waf" if "waf" in lowered or "http 403" in lowered else "network"
 
 
 def login_and_checkin(
@@ -813,7 +886,23 @@ def emit(config: Config, payload: dict[str, Any], silent: bool) -> None:
 # ============================================================================
 
 def run_checkin(config: Config, silent: bool) -> int:
-    """auto / silent 的主流程。"""
+    """auto / silent 的主流程。
+
+    silent（定时任务）会读写状态文件：当天已经签成过就直接跳过，连站点都不碰；
+    只有还没成功时才真正去登录。这样定时任务可以放心地每隔一段时间跑一次，
+    失败自动重试，成功后当天剩下的运行全是空转——站点每天只被登录一次。
+
+    auto（手动）不看状态、也不写状态：你手动敲了就是要它跑。
+    """
+
+    # 两个都无条件先算出来：下面的收尾逻辑要用到，只在 silent 分支里定义的话，
+    # 收尾处一旦有人把判断条件改掉，就会踩 NameError。多算一次没有代价。
+    today = bjt_date()
+    state_path = resolve_state_path()
+
+    if silent and read_done_date(state_path) == today:
+        log.info("今天已签到成功，跳过本次运行")
+        return 0
 
     deadline = Deadline(config.budget_seconds)
 
@@ -825,10 +914,11 @@ def run_checkin(config: Config, silent: bool) -> int:
         failure = classify_connection_error(detail)
         if failure == "waf":
             log.error(
-                "站点返回 WAF 拦截页：当前出口 IP 被站点风控，换个网络环境再试。"
+                "被站点风控拦截：当前出口 IP 被拦（WAF 挑战页或 403），"
+                "换个网络环境再试。"
             )
             result_code = "NO_EXIT"
-            reason = "站点返回 WAF 拦截页，当前出口 IP 被风控"
+            reason = "被站点风控拦截，当前出口 IP 被拦"
         else:
             log.error("无法连接站点：%s", detail)
             result_code = "NETWORK"
@@ -839,6 +929,7 @@ def run_checkin(config: Config, silent: bool) -> int:
             for account in config.accounts
         ]
         emit(config, build_payload(config, results, result_code), silent)
+        # 站点没连上属于可自愈的临时故障，不写状态，留给下次运行重试。
         return 2
 
     quota_per_unit = site_info.get("quota_per_unit")
@@ -869,6 +960,9 @@ def run_checkin(config: Config, silent: bool) -> int:
     payload = build_payload(config, results, result_code)
     emit(config, payload, silent)
     log.info("完成：%s", payload["report"])
+
+    if silent and result_code in TERMINAL_RESULTS:
+        mark_done(state_path, today, result_code)
 
     if result_code == "OK":
         return 0
@@ -908,7 +1002,7 @@ def run_diagnose(config: Config, silent: bool) -> int:
         print(f"FAIL 无法访问 {config.base_url}")
         print(f"     {detail}")
         if failure_kind == "waf":
-            print("     这是站点风控拦截（WAF），不是断网：换个网络环境再试。")
+            print("     这是站点风控拦截（WAF 挑战页或 403），不是断网：换个网络环境再试。")
 
     # result 要跟 failure_kind 一致：以前这里恒为 NO_EXIT，网络不通也报成
     # 「被 WAF 拦」，同一行 JSON 里两个字段互相打脸。
@@ -944,8 +1038,8 @@ def run_diagnose(config: Config, silent: bool) -> int:
 def usage() -> str:
     return (
         "用法：python signin.py [auto|silent|diagnose]\n"
-        "  auto      签到 + 查余额，结果打到 stdout（默认）\n"
-        "  silent    同上，但结果写入日志文件，配合系统定时任务使用\n"
+        "  auto      立刻签到 + 查余额，结果打到 stdout（默认，手动用）\n"
+        "  silent    给定时任务用：当天已签成过就跳过，否则签到并写入日志文件\n"
         "  diagnose  只确认站点是否可达，不登录任何账号\n"
     )
 

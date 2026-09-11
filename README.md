@@ -119,8 +119,8 @@ https://github.com/88lin/agentrouter-auto-signin
    密码 = ___
 3. 执行 python signin.py diagnose，确认站点可达
 4. 执行 python signin.py auto，确认输出里 "result" 是 "OK"、report 里报出了余额
-5. 按我的系统挂上每天 08:10 和 20:10 两个定时任务：
-   · Windows：执行 install-windows.ps1
+5. 按我的系统挂上定时任务，每 30 分钟跑一次 `signin.py silent`：
+   · Windows：执行 install-windows.ps1（不加参数它会自动随机挑起点时间）
    · macOS：参照 agentrouter-auto-signin.plist.example 配 launchd
    · Linux：按 README 的 Linux 段落写 crontab
 6. 最后把第 4 步的完整输出、以及定时任务的下次运行时间一起发给我
@@ -182,23 +182,44 @@ python signin.py auto         # 正式签到
 
 ## ⏰ 挂上定时任务
 
-三个平台都把签到安排在 **08:10** 和 **20:10** 两个时间点。
+**每 30 分钟跑一次就行**，不用你挑时间点。
 
-> 签到按自然日计，一天只算一次，重复运行不加积分。站点没有公开确切的重置时点，
-> 所以 **08:10 那次签当天**，**20:10 是兜底**——顺带应付早上电脑没开机的情况。
-> 多跑一次成本几乎为零，但能避免整天漏签。
+听着很勤，其实站点每天只被登录 **1 次**：脚本会把「今天已经签成了」记进
+`checkin.state`，当天后续的运行读到它就**直接退出，连站点都不碰**。
+只有还没签成时才真的去登录——也就是说，**失败会每 30 分钟自动重试，成功就彻底歇着**。
 
-### 📌 错过后会不会自动补签
+```text
+成功那天                          失败那天
+09:00  跑 → 成功，记下状态         09:00  跑 → 断网，失败
+09:30  跑 → 立刻退出（不联网）      09:30  跑 → 重试，还是失败
+10:00  跑 → 立刻退出               10:00  跑 → 成功，记下状态
+ ...   （当天剩下全是空转）         10:30  跑 → 立刻退出
+```
 
-会，三个平台都做了安排：
+> 签到**按北京时间自然日计算，每天 00:00 重置**，一天只算一次，重复运行不加积分。
+> 脚本也按北京时间判断「今天」，跨时区用也不会判错。
 
-| 平台 | 机制 | 补签时机 |
-|---|---|---|
-| 🪟 Windows | 任务开了「**错过后尽快补跑**」（`StartWhenAvailable`） | 下次开机并登录后自动跑一次 |
-| 🍎 macOS | launchd 的 `RunAtLoad`，并在睡眠恢复时补跑错过的时刻 | 开机登录 / 唤醒后 |
-| 🐧 Linux | cron 单条 `@reboot` + 两个固定时间点 | 开机约 1 分钟后 |
+### 🤔 为什么不用「失败后自动重试」那种设置
 
-> Linux 的普通 cron **不会**补跑错过的任务，所以下面给了 `@reboot` 那一行。
+因为系统根本不提供。Windows 计划任务的「失败后重启」（`RestartCount`）**只管
+「任务启动不起来」，不管「任务跑完了返回失败」**——实测：动作以退出码 2 结束，
+配好 `RestartCount=2`、间隔 1 分钟，等 2.5 分钟一次都没重跑。
+launchd 和 cron 同样没有按退出码重试的机制。
+
+所以只能反过来做：**让任务跑得勤一点，由脚本自己判断今天还需不需要签**。
+状态文件就是干这个的。
+
+### 📌 关机、休眠会不会漏
+
+不会：
+
+| 平台 | 机制 |
+|---|---|
+| 🪟 Windows | 任务开了 `StartWhenAvailable`，关机错过的话下次开机登录后补上；之后每 30 分钟继续 |
+| 🍎 macOS | `StartInterval` 每 30 分钟一次 + `RunAtLoad` 开机登录立刻跑一次 |
+| 🐧 Linux | cron `*/30` + 一条 `@reboot`（普通 cron 不补跑错过的任务，所以 `@reboot` 是必要的）|
+
+因为是每 30 分钟滚动重试，只要机器当天有开过一会儿，就能签上。
 
 ### 🪟 Windows
 
@@ -210,10 +231,17 @@ powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
 
 | 任务 | 频率 | 干什么 |
 |---|---|---|
-| `AgentRouterAutoSignin` | 每天 08:10 | 签到 + 查余额，静默写 `checkin.log` |
-| `AgentRouterRetrySignin` | 每天 20:10 | 兜底重试 |
+| `AgentRouterAutoSignin` | 每 30 分钟 | 当天没签成才真去签，签成过就立刻退出 |
 
-装完会打印下次运行时间。查看日志 `Get-Content checkin.log -Tail 5`。
+**起点时间默认随机挑一分钟**（`00:xx`），不同用户天然错开。想自己定：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 -StartTime 00:17 -IntervalMinutes 30
+```
+
+装完会打印实际用的起点时间和下次运行时间。查看日志 `Get-Content checkin.log -Tail 5`。
+
+> 只有一个任务。如果你装过早期版本的两个任务（`AgentRouterRetrySignin`），重跑安装脚本会自动清掉多余那个。
 
 > [!NOTE]
 > 任务以「当前用户登录时运行」注册，不需要管理员权限、也不用存密码。所以补跑发生在
@@ -223,7 +251,6 @@ powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
 
 ```powershell
 Unregister-ScheduledTask -TaskName "AgentRouterAutoSignin" -Confirm:$false
-Unregister-ScheduledTask -TaskName "AgentRouterRetrySignin" -Confirm:$false
 ```
 
 ### 🍎 macOS
@@ -246,12 +273,13 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/agentrouter-auto-signin.
 ### 🐧 Linux
 
 ```cron
-@reboot     sleep 60 && cd /path/to/agentrouter-auto-signin && /usr/bin/python3 signin.py silent
-10 8 * * *  cd /path/to/agentrouter-auto-signin && /usr/bin/python3 signin.py silent
-10 20 * * * cd /path/to/agentrouter-auto-signin && /usr/bin/python3 signin.py silent
+@reboot      sleep 60 && cd /path/to/agentrouter-auto-signin && /usr/bin/python3 signin.py silent
+13,43 * * * * cd /path/to/agentrouter-auto-signin && /usr/bin/python3 signin.py silent
 ```
 
-第一行是开机补签：`sleep 60` 等网络就绪。crond 不会补跑错过的任务，所以这一行是必要的。
+第二行是每 30 分钟一次。`13,43` 是随手挑的分钟——**换成你自己的两个数**（相差 30 即可，比如 `06,36`），
+别都用 `0,30`，不然大家全卡在整点和半点。
+第一行是开机后立刻补一次：`sleep 60` 等网络就绪。普通 cron 不补跑错过的任务，所以这一行是必要的。
 
 ---
 
@@ -259,11 +287,15 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/agentrouter-auto-signin.
 
 ```bash
 python signin.py            # 等同 auto
-python signin.py auto       # 签到 + 查余额，结果打到 stdout
-python signin.py silent     # 同上，但结果写入 checkin.log（配合定时任务）
+python signin.py auto       # 立刻签到 + 查余额，结果打到 stdout（手动用）
+python signin.py silent     # 给定时任务用：当天已签成过就跳过，否则签到并写 checkin.log
 python signin.py diagnose   # 只确认站点是否可达，不登录任何账号
 python signin.py --help     # 看用法
 ```
+
+> [!NOTE]
+> `auto` 和 `silent` 的区别不只是输出位置：**`silent` 会看状态文件**（当天签过就跳过），
+> `auto` 不看也不写——你手动敲了就是要它跑。所以想强制再签一次，用 `auto`。
 
 > [!NOTE]
 > 没有「只查余额不签到」这个模式——想拿余额就必须登录，而登录就等于签到。
@@ -276,7 +308,7 @@ python signin.py --help     # 看用法
 
 | 字段 | 环境变量 | 默认值 | 说明 |
 |---|---|---|---|
-| `accounts` | `AGENTROUTER_ACCOUNTS`<br>`AGENTROUTER_ACCOUNTS_JSON` | 无（必填） | 账号数组 |
+| `accounts` | `AGENTROUTER_ACCOUNTS`<br>`AGENTROUTER_ACCOUNTS_JSON` | 无（必填） | 账号数组，**最多 10 个** |
 | `base_url` | `AGENTROUTER_BASE_URL` | `https://ps.air-outer.com` | 站点域名，两个官方域名二选一，详见「站点域名」 |
 | `request_timeout` | `AGENTROUTER_REQUEST_TIMEOUT` | `25` | 单次请求超时（秒），夹到 5–120 |
 | `budget_seconds` | `AGENTROUTER_BUDGET_SECONDS` | `300` | 单次运行总预算（秒），夹到 30–540 |
@@ -287,6 +319,9 @@ python signin.py --help     # 看用法
 |---|---|---|
 | `AGENTROUTER_CONFIG` | 脚本同目录 `config.json` | 指定配置文件路径 |
 | `AGENTROUTER_LOG` | 脚本同目录 `checkin.log` | 指定日志文件路径，目录不存在会自动创建 |
+| `AGENTROUTER_STATE` | 脚本同目录 `checkin.state` | 指定状态文件路径（记「今天签过没」） |
+
+状态文件只是省请求的优化：删掉、损坏都不影响签到，最多当天多签一次（幂等，不会重复计分）。
 
 数值项写错不会让脚本崩：会回退成默认值，并在输出里附一条 `config_warning` 说明是哪一项。
 
@@ -367,11 +402,11 @@ export AGENTROUTER_ACCOUNTS_JSON='[{"username":"alice@qq.com","password":" pw 12
 
 | 现象 | 处理 |
 |---|---|
-| `AUTH_ERROR` | 确认填的是**邮箱**，且已按「前置条件」绑定邮箱并重置过密码 |
+| `AUTH_ERROR` | 确认填的是**邮箱**，且已按「前置条件」绑定邮箱并重置过密码。⚠️ 改好密码后**手动跑一次 `python signin.py auto`，或删掉 `checkin.state`**——当天一旦判定密码错就会被记为「到此为止」，定时任务会一直跳过到次日 |
 | `NO_EXIT` | 当前出口 IP 被站点风控拦了（WAF 挑战页或 403），站点本身是通的。**换个网络环境**再试，别去查断网/DNS |
 | `NETWORK` | 真的连不上站点：断网、DNS 异常、被本地防火墙拦截。可试试换另一个官方域名（见「站点域名」） |
 | `TIMEOUT` | 网络严重超时，已成功的部分照常记录，剩余项等下次定时任务重试 |
-| `CONFIG_ERROR` | 没建 `config.json`、没填账号、`base_url` 不是 https 等，报错信息里会写明是哪一项 |
+| `CONFIG_ERROR` | 没建 `config.json`、没填账号、`base_url` 不是 https、**账号超过 10 个**等，报错信息里会写明是哪一项 |
 | `ERROR` | 其他异常，`report` 里有摘要，`error_type` 里是异常类型 |
 | 输出里有 `config_warning` | 配置项写错被回退成默认值了（比如 `request_timeout` 填了非数字），照着提示改 `config.json` |
 | 提示缺少 `requests` | 先在仓库目录跑 `python -m pip install -r requirements.txt` |
@@ -391,10 +426,17 @@ export AGENTROUTER_ACCOUNTS_JSON='[{"username":"alice@qq.com","password":" pw 12
 - 只重试瞬时故障；密码错误不会被重试，不存在拿你的账号反复试密码
 - 脚本只作用于**你自己的**账号
 
-## ⚠️ 免责声明
+## ⚠️ 合规与免责
+
+本工具面向**个人真实使用**：帮你别漏签、顺手看余额。请照站点的[使用规范](https://agentrouter.org/docs/terms.html)来用，别用于多账号批量刷额度、倒卖账号或其他违规行为——脚本也把账号数**硬限制在 10 个以内**，就是不想给这类用途留口子。
+
+两点值得知道：
+
+- **光签到不用，额度可能被收回。** 规范里写了，资源按「真实、持续使用」动态调整，长期不产生真实调用的账号可能被缩减。签到保住的是「别漏领」，替不了实际使用。
+- 具体条款以[官方页面](https://agentrouter.org/docs/terms.html)当前内容为准，它会不时修订。
 
 > [!WARNING]
-> 本项目为**非官方**工具，与 AgentRouter 无任何隶属关系。接口来自站点前端，仅供个人自动化使用。使用风险自负；接口可能随时变动且不另行通知。请遵守站点服务条款，不要用于批量注册、薅羊毛或其他违反规则的行为。
+> 本项目为**非官方**工具，与 AgentRouter 无任何隶属关系。接口来自站点前端，可能随时变动且不另行通知。使用风险自负。
 
 ---
 
