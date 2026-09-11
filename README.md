@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/cover.jpg" alt="agentrouter-auto-signin —— AgentRouter 每日自动签到脚本" width="100%">
+
 # 🚀 agentrouter-auto-signin
 
 **每天自动完成 AgentRouter 签到，并把余额查回给你**
