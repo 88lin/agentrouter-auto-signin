@@ -99,7 +99,7 @@ AgentRouter 每天签到能领 $25 额度，但得你自己记着去登录一次
 
 | | 适合谁 | 花多久 |
 |---|---|---|
-| **🤖 懒人一键** | 手边有 Claude Code / Cursor / Codex 之类的 AI 助手 | 发一段话，全程不用自己敲命令 |
+| **🤖 懒人一键** | 手边有 WorkBuddy、Zcode 这类国产 AI 助手 | 发一段话，全程不用自己敲命令 |
 | **⌨️ 手动安装** | 想自己掌握每一步，或者手边没有 AI 助手 | 约 3 分钟 |
 
 ### 🤖 懒人一键
@@ -430,12 +430,12 @@ export AGENTROUTER_ACCOUNTS_JSON='[{"username":"alice@qq.com","password":" pw 12
 
 ## ⚠️ 合规与免责
 
-本工具面向**个人真实使用**：帮你别漏签、顺手看余额。请照站点的[使用规范](https://agentrouter.org/docs/terms.html)来用，别用于多账号批量刷额度、倒卖账号或其他违规行为——脚本也把账号数**硬限制在 10 个以内**，就是不想给这类用途留口子。
+本工具面向**个人真实使用**：帮你别漏签、顺手看余额。请照站点的[使用规范](https://ps.air-outer.com/docs/terms.html)来用，别用于多账号批量刷额度、倒卖账号或其他违规行为——脚本也把账号数**硬限制在 10 个以内**，就是不想给这类用途留口子。
 
 两点值得知道：
 
 - **光签到不用，额度可能被收回。** 规范里写了，资源按「真实、持续使用」动态调整，长期不产生真实调用的账号可能被缩减。签到保住的是「别漏领」，替不了实际使用。
-- 具体条款以[官方页面](https://agentrouter.org/docs/terms.html)当前内容为准，它会不时修订。
+- 具体条款以[官方页面](https://ps.air-outer.com/docs/terms.html)当前内容为准，它会不时修订。
 
 > [!WARNING]
 > 本项目为**非官方**工具，与 AgentRouter 无任何隶属关系。接口来自站点前端，可能随时变动且不另行通知。使用风险自负。
@@ -452,4 +452,4 @@ export AGENTROUTER_ACCOUNTS_JSON='[{"username":"alice@qq.com","password":" pw 12
 
 ## 📄 协议
 
-[MIT](LICENSE) © 2026 [88lin](https://github.com/88lin)
+[MIT](LICENSE) © 2026 [88lin](https://github.com/88lin) · 仓库：[github.com/88lin/agentrouter-auto-signin](https://github.com/88lin/agentrouter-auto-signin)
