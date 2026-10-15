@@ -80,8 +80,6 @@ AgentRouter 每天签到能领 $25 额度，但得你自己记着去登录一次
 </tr>
 </table>
 
----
-
 ## 📋 前置条件
 
 - 已注册 [AgentRouter](https://agentrouter.org/register?aff=ugVO)
